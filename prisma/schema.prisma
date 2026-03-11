@@ -1,0 +1,411 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// AUTH / USERS
+// ============================================================
+
+enum UserRole {
+  ADMIN
+  BILLING_STAFF
+  READ_ONLY
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  passwordHash  String
+  role          UserRole  @default(BILLING_STAFF)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  auditLogs     AuditLog[]
+  changes       SubscriptionChange[]
+}
+
+// ============================================================
+// CUSTOMERS
+// ============================================================
+
+model Customer {
+  id            String    @id @default(cuid())
+  name          String
+  accountNumber String?   @unique
+  contactEmail  String?
+  contactPhone  String?
+  notes         String?
+  currency      String    @default("ZAR")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  subscriptions   Subscription[]
+  prices          CustomerPrice[]
+  invoiceDrafts   InvoiceDraft[]
+  amendmentItems  AmendmentQueueItem[]
+}
+
+// ============================================================
+// PRODUCTS / SKUs
+// ============================================================
+
+model Product {
+  id            String    @id @default(cuid())
+  name          String
+  sku           String    @unique
+  category      String?
+  description   String?
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  subscriptions Subscription[]
+  priceEntries  CustomerPrice[]
+  upgradeFrom   ProductUpgradePath[] @relation("UpgradeFrom")
+  upgradeTo     ProductUpgradePath[] @relation("UpgradeTo")
+}
+
+model ProductUpgradePath {
+  id            String    @id @default(cuid())
+  fromProductId String
+  toProductId   String
+  isUpgrade     Boolean   @default(true)
+
+  fromProduct   Product   @relation("UpgradeFrom", fields: [fromProductId], references: [id])
+  toProduct     Product   @relation("UpgradeTo", fields: [toProductId], references: [id])
+
+  @@unique([fromProductId, toProductId])
+}
+
+// ============================================================
+// CUSTOMER-SPECIFIC PRICING
+// ============================================================
+
+model CustomerPrice {
+  id            String    @id @default(cuid())
+  customerId    String
+  productId     String
+  pricePerSeat  Float
+  currency      String    @default("USD")
+  effectiveFrom DateTime  @default(now())
+  effectiveTo   DateTime?
+  notes         String?
+  createdAt     DateTime  @default(now())
+
+  customer      Customer  @relation(fields: [customerId], references: [id])
+  product       Product   @relation(fields: [productId], references: [id])
+
+  @@index([customerId, productId])
+}
+
+// ============================================================
+// FX RATES
+// ============================================================
+
+model FxRate {
+  id            String    @id @default(cuid())
+  fromCurrency  String    @default("USD")
+  toCurrency    String    @default("ZAR")
+  rate          Float
+  effectiveDate DateTime
+  billingPeriod String?
+  createdAt     DateTime  @default(now())
+
+  @@unique([fromCurrency, toCurrency, effectiveDate])
+}
+
+// ============================================================
+// SUBSCRIPTIONS
+// ============================================================
+
+enum TermType {
+  MONTHLY
+  ANNUAL
+  THREE_YEAR
+}
+
+enum BillingFrequency {
+  MONTHLY
+  ANNUAL
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  SUSPENDED
+  EST
+  PENDING_RENEWAL
+}
+
+model Subscription {
+  id                  String              @id @default(cuid())
+  customerId          String
+  productId           String
+  termType            TermType
+  billingFrequency    BillingFrequency    @default(MONTHLY)
+  seatCount           Int
+  status              SubscriptionStatus  @default(ACTIVE)
+  startDate           DateTime
+  renewalDate         DateTime
+  termEndDate         DateTime
+  autoRenew           Boolean             @default(true)
+  microsoftSubId      String?
+  notes               String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+
+  customer            Customer            @relation(fields: [customerId], references: [id])
+  product             Product             @relation(fields: [productId], references: [id])
+
+  changes             SubscriptionChange[]
+  sevenDayWindows     SevenDayWindow[]
+  scheduledChanges    ScheduledChange[]
+
+  @@index([customerId])
+  @@index([renewalDate])
+}
+
+// ============================================================
+// SUBSCRIPTION CHANGES
+// ============================================================
+
+enum ChangeType {
+  ADD_SEATS
+  REMOVE_SEATS
+  UPGRADE
+  DOWNGRADE
+  CANCELLATION
+  RENEWAL
+  NEW_SUBSCRIPTION
+  EST_ENTRY
+}
+
+enum ChangeStatus {
+  PENDING
+  APPLIED
+  SCHEDULED
+  CANCELLED
+}
+
+model SubscriptionChange {
+  id                  String          @id @default(cuid())
+  subscriptionId      String
+  changeType          ChangeType
+  status              ChangeStatus    @default(APPLIED)
+  effectiveDate       DateTime
+  previousSeatCount   Int?
+  newSeatCount        Int?
+  previousProductId   String?
+  newProductId        String?
+  proRataAmount       Float?
+  proRataDays         Int?
+  proRataDailyRate    Float?
+  billingCurrency     String          @default("ZAR")
+  fxRateUsed          Float?
+  notes               String?
+  createdById         String
+  createdAt           DateTime        @default(now())
+
+  subscription        Subscription    @relation(fields: [subscriptionId], references: [id])
+  createdBy           User            @relation(fields: [createdById], references: [id])
+  invoiceDraft        InvoiceDraft?
+  sevenDayWindow      SevenDayWindow?
+
+  @@index([subscriptionId])
+  @@index([effectiveDate])
+}
+
+// ============================================================
+// 7-DAY CANCELLATION WINDOWS
+// ============================================================
+
+enum WindowType {
+  NEW_SUBSCRIPTION
+  RENEWAL
+  MID_TERM_ADDITION
+}
+
+model SevenDayWindow {
+  id                  String          @id @default(cuid())
+  subscriptionId      String
+  changeId            String?         @unique
+  windowType          WindowType
+  opensAt             DateTime
+  closesAt            DateTime
+  seatsAffected       Int?
+  isClosed            Boolean         @default(false)
+  createdAt           DateTime        @default(now())
+
+  subscription        Subscription    @relation(fields: [subscriptionId], references: [id])
+  change              SubscriptionChange? @relation(fields: [changeId], references: [id])
+
+  @@index([subscriptionId])
+  @@index([closesAt])
+}
+
+// ============================================================
+// SCHEDULED CHANGES
+// ============================================================
+
+enum ScheduledChangeStatus {
+  PENDING
+  ACTIONED
+  CANCELLED
+}
+
+model ScheduledChange {
+  id                  String                  @id @default(cuid())
+  subscriptionId      String
+  changeType          ChangeType
+  scheduledDate       DateTime
+  targetSeatCount     Int?
+  targetProductId     String?
+  status              ScheduledChangeStatus   @default(PENDING)
+  notes               String?
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+  actionedAt          DateTime?
+
+  subscription        Subscription            @relation(fields: [subscriptionId], references: [id])
+
+  @@index([subscriptionId])
+  @@index([scheduledDate])
+  @@index([status])
+}
+
+// ============================================================
+// INVOICE DRAFTS
+// ============================================================
+
+enum InvoiceDraftType {
+  PRO_RATA
+  CREDIT_NOTE
+  UPGRADE_ADJUSTMENT
+  FULL_MONTH
+}
+
+model InvoiceDraft {
+  id                  String              @id @default(cuid())
+  customerId          String
+  changeId            String              @unique
+  draftType           InvoiceDraftType
+  invoiceDate         DateTime
+  dueDate             DateTime?
+  totalAmount         Float
+  currency            String              @default("ZAR")
+  notes               String?
+  createdAt           DateTime            @default(now())
+
+  customer            Customer            @relation(fields: [customerId], references: [id])
+  change              SubscriptionChange  @relation(fields: [changeId], references: [id])
+  lineItems           InvoiceLineItem[]
+}
+
+model InvoiceLineItem {
+  id                  String          @id @default(cuid())
+  invoiceDraftId      String
+  description         String
+  quantity            Float
+  unitPrice           Float
+  lineTotal           Float
+  calculationBreakdown String?
+  sortOrder           Int             @default(0)
+
+  invoiceDraft        InvoiceDraft    @relation(fields: [invoiceDraftId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceDraftId])
+}
+
+// ============================================================
+// AMENDMENT QUEUE
+// ============================================================
+
+model AmendmentQueueItem {
+  id                  String          @id @default(cuid())
+  customerId          String
+  description         String
+  productName         String
+  newMonthlyAmount    Float
+  newSeatCount        Int
+  actionByDate        DateTime
+  reason              String
+  isCompleted         Boolean         @default(false)
+  completedAt         DateTime?
+  isScheduledChange   Boolean         @default(false)
+  scheduledChangeId   String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  customer            Customer        @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@index([isCompleted])
+  @@index([actionByDate])
+}
+
+// ============================================================
+// RECONCILIATION
+// ============================================================
+
+model ReconciliationImport {
+  id                  String          @id @default(cuid())
+  fileName            String
+  importDate          DateTime        @default(now())
+  billingPeriod       String
+  status              String          @default("PENDING")
+  totalRecords        Int             @default(0)
+  matchedRecords      Int             @default(0)
+  discrepancies       Int             @default(0)
+  createdAt           DateTime        @default(now())
+
+  items               ReconciliationItem[]
+}
+
+model ReconciliationItem {
+  id                  String          @id @default(cuid())
+  importId            String
+  customerName        String
+  productName         String
+  sku                 String?
+  externalQuantity    Int
+  externalAmount      Float
+  internalQuantity    Int?
+  internalAmount      Float?
+  hasDiscrepancy      Boolean         @default(false)
+  discrepancyNotes    String?
+  createdAt           DateTime        @default(now())
+
+  import              ReconciliationImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId])
+}
+
+// ============================================================
+// AUDIT LOG
+// ============================================================
+
+model AuditLog {
+  id                  String          @id @default(cuid())
+  userId              String
+  action              String
+  entityType          String
+  entityId            String
+  details             String?
+  proRataAmount       Float?
+  sevenDayWindowOpen  Boolean?
+  xeroInstructionsGen Boolean         @default(false)
+  scheduledChangeCreated Boolean      @default(false)
+  createdAt           DateTime        @default(now())
+
+  user                User            @relation(fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+}

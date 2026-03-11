@@ -28,12 +28,14 @@ export default function LoginPage() {
       const result = await signIn("credentials", {
         email,
         password,
-        redirect: true,
+        redirect: false,
         callbackUrl: "/dashboard",
       });
 
       if (result?.error) {
         setError("Invalid email or password.");
+      } else if (result?.url) {
+        window.location.href = result.url;
       }
     } catch {
       setError("An unexpected error occurred. Please try again.");

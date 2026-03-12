@@ -115,9 +115,9 @@ export default function ReconciliationPage() {
 
       <div className="flex items-center gap-4">
         <label className="cursor-pointer">
-          <Button asChild disabled={uploading}>
-            <span>{uploading ? "Processing..." : "Upload CSV"}</span>
-          </Button>
+          <span className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground ring-offset-background hover:bg-primary/90">
+            {uploading ? "Processing..." : "Upload CSV"}
+          </span>
           <input
             type="file"
             accept=".csv"

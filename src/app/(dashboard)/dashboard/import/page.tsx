@@ -18,9 +18,13 @@ interface ImportRow {
   productName: string;
   sku?: string;
   quantity: number;
+  assigned?: number;
+  surplus?: number;
   termType?: string;
   microsoftSubId?: string;
   pricePerSeat?: number;
+  renewalDate?: string;
+  currency?: string;
 }
 
 interface ImportResult {
@@ -69,16 +73,24 @@ export default function ImportPage() {
     const headers = lines[0].split(",").map((h) => h.trim().toLowerCase());
 
     // Find column indices by flexible header matching
+    // Supports both custom CSV format and Crayon Renewal Report format
     const colMap: Record<string, number> = {};
 
     headers.forEach((h, i) => {
-      if (h.includes("customer") && h.includes("name")) colMap.customerName = i;
+      // Customer name: "Customer Name", "Customer", "Cloud Account" (Crayon)
+      if (h === "cloud account") colMap.customerName = i;
+      else if (h.includes("customer") && h.includes("name")) colMap.customerName = i;
       else if (h === "customer" || h === "customer name") colMap.customerName = i;
+      // Domain
       else if (h.includes("domain")) colMap.domain = i;
       else if (h.includes("contact") && h.includes("email")) colMap.contactEmail = i;
+      // Product name: "Product Name", "Product"
       else if (h.includes("product") && h.includes("name")) colMap.productName = i;
       else if (h === "product" || h === "product name") colMap.productName = i;
-      else if (h === "sku" || h === "product sku") colMap.sku = i;
+      // SKU: "SKU", "SKU Name" (Crayon), "Product SKU"
+      else if (h === "sku" || h === "sku name" || h === "product sku") colMap.sku = i;
+      // Quantity: "Total Licences" (Crayon), "Quantity", "Seats", etc.
+      else if (h === "total licences" || h === "total licenses") colMap.quantity = i;
       else if (
         h.includes("quantity") ||
         h.includes("qty") ||
@@ -88,23 +100,31 @@ export default function ImportPage() {
         h === "licences"
       )
         colMap.quantity = i;
+      // Assigned (Crayon)
+      else if (h === "assigned") colMap.assigned = i;
+      // Surplus (Crayon)
+      else if (h === "surplus") colMap.surplus = i;
+      // Term type
       else if (h.includes("term") && h.includes("type")) colMap.termType = i;
       else if (h === "term" || h === "term type") colMap.termType = i;
+      // Microsoft Sub ID
       else if (
         h.includes("microsoft") ||
         h.includes("sub id") ||
         h.includes("subscription id")
       )
         colMap.microsoftSubId = i;
-      else if (
-        h.includes("price") ||
-        h === "price per seat" ||
-        h === "unit price"
-      )
-        colMap.pricePerSeat = i;
+      // Price per seat: also match Crayon's "Unit Price" columns
+      else if (h === "price per seat" || h === "unit price") colMap.pricePerSeat = i;
+      else if (h.includes("price") && !h.includes("potential") && !h.includes("sav")) colMap.pricePerSeat = i;
+      // Renewal date (Crayon)
+      else if (h === "renewal date" || h.includes("renewal")) colMap.renewalDate = i;
+      // Currency (Crayon: "Potential Sav Currency" or just "Currency")
+      else if (h === "currency") colMap.currency = i;
+      else if (h.includes("currency") && colMap.currency === undefined) colMap.currency = i;
     });
 
-    // Also check simpler single-word headers
+    // Fallback: check simpler single-word headers
     headers.forEach((h, i) => {
       if (h === "customer" && colMap.customerName === undefined) colMap.customerName = i;
       if (h === "product" && colMap.productName === undefined) colMap.productName = i;
@@ -160,6 +180,14 @@ export default function ImportPage() {
         productName: cols[colMap.productName],
         sku: colMap.sku !== undefined ? cols[colMap.sku] : undefined,
         quantity: qty,
+        assigned:
+          colMap.assigned !== undefined
+            ? parseInt(cols[colMap.assigned]) || undefined
+            : undefined,
+        surplus:
+          colMap.surplus !== undefined
+            ? parseInt(cols[colMap.surplus]) || undefined
+            : undefined,
         termType:
           colMap.termType !== undefined ? cols[colMap.termType] : undefined,
         microsoftSubId:
@@ -169,6 +197,14 @@ export default function ImportPage() {
         pricePerSeat:
           colMap.pricePerSeat !== undefined
             ? parseFloat(cols[colMap.pricePerSeat]) || undefined
+            : undefined,
+        renewalDate:
+          colMap.renewalDate !== undefined
+            ? cols[colMap.renewalDate] || undefined
+            : undefined,
+        currency:
+          colMap.currency !== undefined
+            ? cols[colMap.currency] || undefined
             : undefined,
       });
     }
@@ -261,72 +297,57 @@ export default function ImportPage() {
       {/* CSV Format Guide */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">CSV Format</CardTitle>
+          <CardTitle className="text-base">Supported Formats</CardTitle>
           <CardDescription>
-            Your CSV should include these columns (flexible header matching):
+            Upload a Crayon Renewal Report directly, or use a custom CSV.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
-              <div>
-                <span className="font-medium text-slate-900">
-                  Customer Name
-                </span>{" "}
-                <span className="text-red-500">*</span>
-              </div>
-              <div className="text-slate-500">
-                e.g. &quot;Dr Christelle Nel&quot;
-              </div>
-              <div>
-                <span className="font-medium text-slate-900">
-                  Product Name
-                </span>{" "}
-                <span className="text-red-500">*</span>
-              </div>
-              <div className="text-slate-500">
-                e.g. &quot;Microsoft 365 Business Premium&quot;
-              </div>
-              <div>
-                <span className="font-medium text-slate-900">Quantity</span>{" "}
-                <span className="text-red-500">*</span>
-              </div>
-              <div className="text-slate-500">
-                Number of seats/licences
-              </div>
-              <div>
-                <span className="font-medium text-slate-900">Domain</span>
-              </div>
-              <div className="text-slate-500">
-                e.g. &quot;drcnel.onmicrosoft.com&quot;
-              </div>
-              <div>
-                <span className="font-medium text-slate-900">Term Type</span>
-              </div>
-              <div className="text-slate-500">
-                Monthly, Annual, or Three Year (default: Annual)
-              </div>
-              <div>
-                <span className="font-medium text-slate-900">
-                  Microsoft Sub Id
-                </span>
-              </div>
-              <div className="text-slate-500">
-                Subscription GUID from Partner Center
-              </div>
-              <div>
-                <span className="font-medium text-slate-900">
-                  Price Per Seat
-                </span>
-              </div>
-              <div className="text-slate-500">
-                Customer&apos;s agreed ZAR price per seat
+          <div className="space-y-4">
+            {/* Crayon format */}
+            <div>
+              <p className="text-sm font-medium text-slate-900 mb-1">
+                Crayon Renewal Report (recommended)
+              </p>
+              <p className="text-xs text-slate-500 mb-2">
+                Export directly from Cloud-iQ and upload the CSV as-is. These columns are automatically detected:
+              </p>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                <div><span className="font-medium text-slate-900">Cloud Account</span> <span className="text-red-500">*</span></div>
+                <div className="text-slate-500">Customer name (e.g. &quot;121 Drilling&quot;)</div>
+                <div><span className="font-medium text-slate-900">Product Name</span> <span className="text-red-500">*</span></div>
+                <div className="text-slate-500">e.g. &quot;Exchange Online (Plan 1)&quot;</div>
+                <div><span className="font-medium text-slate-900">Total Licences</span> <span className="text-red-500">*</span></div>
+                <div className="text-slate-500">Number of purchased seats</div>
+                <div><span className="font-medium text-slate-900">SKU Name</span></div>
+                <div className="text-slate-500">Product SKU identifier</div>
+                <div><span className="font-medium text-slate-900">Assigned</span></div>
+                <div className="text-slate-500">Licences currently assigned to users</div>
+                <div><span className="font-medium text-slate-900">Surplus</span></div>
+                <div className="text-slate-500">Unassigned licences (highlighted if &gt; 0)</div>
+                <div><span className="font-medium text-slate-900">Renewal Date</span></div>
+                <div className="text-slate-500">DD/MM/YYYY — sets the subscription renewal date</div>
+                <div><span className="font-medium text-slate-900">Unit Price</span></div>
+                <div className="text-slate-500">Sets customer price per seat</div>
               </div>
             </div>
-            <div className="flex gap-2 pt-2">
-              <Button variant="outline" size="sm" onClick={downloadSample}>
-                Download Template CSV
-              </Button>
+
+            <hr className="border-slate-200" />
+
+            {/* Custom format */}
+            <div>
+              <p className="text-sm font-medium text-slate-900 mb-1">
+                Custom CSV
+              </p>
+              <p className="text-xs text-slate-500 mb-2">
+                Minimum columns: Customer Name, Product Name, Quantity.
+                Optional: Domain, Term Type, Microsoft Sub Id, Price Per Seat, Renewal Date.
+              </p>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={downloadSample}>
+                  Download Template CSV
+                </Button>
+              </div>
             </div>
           </div>
         </CardContent>
@@ -391,13 +412,16 @@ export default function ImportPage() {
                     Product
                   </th>
                   <th className="px-3 py-2 text-right font-medium text-slate-700">
-                    Qty
+                    Licences
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-700">
+                    Assigned
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium text-slate-700">
+                    Surplus
                   </th>
                   <th className="px-3 py-2 text-left font-medium text-slate-700">
-                    Term
-                  </th>
-                  <th className="px-3 py-2 text-left font-medium text-slate-700">
-                    Microsoft Sub ID
+                    Renewal
                   </th>
                   <th className="px-3 py-2 text-right font-medium text-slate-700">
                     Price/Seat
@@ -418,15 +442,23 @@ export default function ImportPage() {
                     </td>
                     <td className="px-3 py-2 text-slate-900">
                       {row.productName}
+                      {row.sku && row.sku !== row.productName && (
+                        <span className="ml-1 text-xs text-slate-400">
+                          ({row.sku})
+                        </span>
+                      )}
                     </td>
                     <td className="px-3 py-2 text-right font-medium text-slate-900">
                       {row.quantity}
                     </td>
-                    <td className="px-3 py-2 text-slate-600">
-                      {row.termType || "Annual"}
+                    <td className="px-3 py-2 text-right text-slate-600">
+                      {row.assigned ?? "—"}
                     </td>
-                    <td className="px-3 py-2 text-xs font-mono text-slate-500">
-                      {row.microsoftSubId || "—"}
+                    <td className={`px-3 py-2 text-right ${row.surplus && row.surplus > 0 ? "text-amber-600 font-medium" : "text-slate-600"}`}>
+                      {row.surplus ?? "—"}
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {row.renewalDate || "—"}
                     </td>
                     <td className="px-3 py-2 text-right text-slate-600">
                       {row.pricePerSeat ? `R${row.pricePerSeat}` : "—"}

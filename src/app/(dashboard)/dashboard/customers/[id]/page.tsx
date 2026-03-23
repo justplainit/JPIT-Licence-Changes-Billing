@@ -79,6 +79,14 @@ export default function CustomerDetailPage() {
   const [saving, setSaving] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // Price editing state
+  const [editingPriceFor, setEditingPriceFor] = useState<string | null>(null); // productId
+  const [priceEditValues, setPriceEditValues] = useState<{
+    pricePerSeat: string;
+    currency: string;
+  }>({ pricePerSeat: "", currency: "USD" });
+  const [savingPrice, setSavingPrice] = useState(false);
+
   const fetchCustomer = useCallback(async () => {
     try {
       setLoading(true);
@@ -142,13 +150,66 @@ export default function CustomerDetailPage() {
 
       setEditingSubId(null);
       setEditValues({});
-      setSuccessMsg(`Updated successfully`);
+      setSuccessMsg(`Subscription updated successfully`);
       setTimeout(() => setSuccessMsg(null), 3000);
       fetchCustomer();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save");
     } finally {
       setSaving(null);
+    }
+  };
+
+  const startEditingPrice = (sub: Subscription) => {
+    const price = getPrice(sub.productId);
+    setEditingPriceFor(sub.productId);
+    setPriceEditValues({
+      pricePerSeat: price ? String(price.pricePerSeat) : "",
+      currency: price?.currency || "USD",
+    });
+    setSuccessMsg(null);
+  };
+
+  const cancelEditingPrice = () => {
+    setEditingPriceFor(null);
+    setPriceEditValues({ pricePerSeat: "", currency: "USD" });
+  };
+
+  const savePrice = async (productId: string) => {
+    setSavingPrice(true);
+    setError(null);
+    try {
+      const pricePerSeat = parseFloat(priceEditValues.pricePerSeat);
+      if (isNaN(pricePerSeat) || pricePerSeat < 0) {
+        throw new Error("Price must be a valid number >= 0");
+      }
+
+      const res = await fetch("/api/prices", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customerId,
+          productId,
+          pricePerSeat,
+          currency: priceEditValues.currency,
+          notes: "Price updated from customer detail page",
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to update price");
+      }
+
+      setEditingPriceFor(null);
+      setPriceEditValues({ pricePerSeat: "", currency: "USD" });
+      setSuccessMsg("Price updated successfully");
+      setTimeout(() => setSuccessMsg(null), 3000);
+      fetchCustomer();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save price");
+    } finally {
+      setSavingPrice(false);
     }
   };
 
@@ -224,6 +285,7 @@ export default function CustomerDetailPage() {
           <div className="space-y-3">
             {customer.subscriptions.map((sub) => {
               const isEditing = editingSubId === sub.id;
+              const isEditingPrice = editingPriceFor === sub.productId;
               const price = getPrice(sub.productId);
               const monthlyTotal = price
                 ? price.pricePerSeat * sub.seatCount
@@ -253,15 +315,89 @@ export default function CustomerDetailPage() {
                     </div>
 
                     <div className="flex items-center gap-6 flex-shrink-0">
+                      {/* Price per seat */}
+                      <div className="text-right">
+                        {isEditingPrice ? (
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={priceEditValues.currency}
+                              onChange={(e) =>
+                                setPriceEditValues((prev) => ({
+                                  ...prev,
+                                  currency: e.target.value,
+                                }))
+                              }
+                              className="h-8 w-16 rounded border border-input bg-background px-1 text-xs"
+                            >
+                              <option value="USD">USD</option>
+                              <option value="ZAR">ZAR</option>
+                              <option value="EUR">EUR</option>
+                              <option value="GBP">GBP</option>
+                            </select>
+                            <Input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={priceEditValues.pricePerSeat}
+                              onChange={(e) =>
+                                setPriceEditValues((prev) => ({
+                                  ...prev,
+                                  pricePerSeat: e.target.value,
+                                }))
+                              }
+                              className="h-8 w-24 text-xs"
+                              placeholder="Price/seat"
+                            />
+                            <Button
+                              size="sm"
+                              className="h-8 text-xs"
+                              disabled={savingPrice}
+                              onClick={() => savePrice(sub.productId)}
+                            >
+                              {savingPrice ? "..." : "Save"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-8 text-xs"
+                              onClick={cancelEditingPrice}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => startEditingPrice(sub)}
+                            className="text-right group"
+                            title="Click to edit price"
+                          >
+                            {price ? (
+                              <>
+                                <p className="text-sm font-semibold text-slate-900 group-hover:text-blue-600">
+                                  {price.currency === "USD" ? "$" : "R"}
+                                  {price.pricePerSeat.toFixed(2)}/seat
+                                </p>
+                                <p className="text-xs text-slate-400 group-hover:text-blue-500">
+                                  click to edit
+                                </p>
+                              </>
+                            ) : (
+                              <p className="text-xs text-amber-600 group-hover:text-blue-600">
+                                No price set — click to add
+                              </p>
+                            )}
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Seat count & monthly total */}
                       <div className="text-right">
                         <p className="text-sm font-semibold text-slate-900">
                           {sub.seatCount} seats
                         </p>
                         {monthlyTotal !== null && price && (
                           <p className="text-xs text-slate-500">
-                            {sub.seatCount} x {price.currency === "USD" ? "$" : "R"}
-                            {price.pricePerSeat.toFixed(2)} ={" "}
-                            {price.currency === "USD" ? "$" : "R"}
+                            = {price.currency === "USD" ? "$" : "R"}
                             {monthlyTotal.toFixed(2)}/mo
                           </p>
                         )}
@@ -429,11 +565,11 @@ export default function CustomerDetailPage() {
         )}
       </div>
 
-      {/* Pricing */}
+      {/* Pricing History */}
       {customer.prices.length > 0 && (
         <div>
           <h2 className="text-lg font-semibold text-slate-900 mb-3">
-            Customer Pricing
+            Pricing History
           </h2>
           <div className="overflow-x-auto rounded-lg border border-gray-200">
             <table className="min-w-full divide-y divide-gray-200">

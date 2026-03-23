@@ -44,6 +44,9 @@ export default function ChangesPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  const [reverting, setReverting] = useState<string | null>(null);
+  const [revertConfirm, setRevertConfirm] = useState<string | null>(null);
+
   const [form, setForm] = useState({
     subscriptionId: "",
     changeType: "ADD_SEATS",
@@ -137,6 +140,33 @@ export default function ChangesPage() {
     }
   };
 
+  const handleRevert = async (changeId: string) => {
+    setReverting(changeId);
+    setError(null);
+    setSuccess(null);
+    try {
+      const res = await fetch(`/api/changes/${changeId}/revert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Manual revert from Changes page" }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to revert change");
+      }
+      const result = await res.json();
+      setSuccess(
+        `Reverted ${result.changeType.replace(/_/g, " ")} for ${result.customerName} – ${result.productName}`
+      );
+      setRevertConfirm(null);
+      fetchChanges();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to revert");
+    } finally {
+      setReverting(null);
+    }
+  };
+
   const getChangeTypeBadge = (type: string) => {
     const styles: Record<string, string> = {
       ADD_SEATS: "bg-green-100 text-green-800",
@@ -200,6 +230,8 @@ export default function ChangesPage() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Pro-Rata</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Logged By</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -227,6 +259,49 @@ export default function ChangesPage() {
                   </td>
                   <td className="px-6 py-4 text-sm text-slate-600">
                     {change.createdBy.name}
+                  </td>
+                  <td className="px-6 py-4 text-sm">
+                    <span
+                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                        change.status === "CANCELLED"
+                          ? "bg-gray-100 text-gray-500 line-through"
+                          : change.status === "SCHEDULED"
+                            ? "bg-purple-100 text-purple-700"
+                            : "bg-green-100 text-green-700"
+                      }`}
+                    >
+                      {change.status}
+                    </span>
+                  </td>
+                  <td className="px-6 py-4 text-sm">
+                    {change.status !== "CANCELLED" && (
+                      revertConfirm === change.id ? (
+                        <div className="flex items-center gap-2">
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            disabled={reverting === change.id}
+                            onClick={() => handleRevert(change.id)}
+                          >
+                            {reverting === change.id ? "Reverting..." : "Confirm"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setRevertConfirm(null)}
+                          >
+                            No
+                          </Button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setRevertConfirm(change.id)}
+                          className="text-red-600 hover:text-red-800 text-xs font-medium"
+                        >
+                          Undo
+                        </button>
+                      )
+                    )}
                   </td>
                 </tr>
               ))}

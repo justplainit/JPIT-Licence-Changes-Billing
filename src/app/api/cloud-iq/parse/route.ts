@@ -3,6 +3,32 @@ import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
 import { parseCloudIQNotification } from "@/lib/cloud-iq-parser";
 
+// Detect state-change events from Cloud-iQ notifications
+const EXPIRED_STATES = ["expired", "deleted", "disabled"];
+const SUSPENDED_STATES = ["suspended"];
+const ACTIVE_STATES = ["active"];
+
+function parseStateChangeEvent(event: string): {
+  isStateChange: boolean;
+  fromState: string;
+  toState: string;
+  isCancellation: boolean;
+  isSuspension: boolean;
+  isReactivation: boolean;
+} {
+  // Match patterns like "State changed from Active to Expired"
+  const match = event.match(/state\s+changed\s+from\s+(\w+)\s+to\s+(\w+)/i);
+  if (!match) {
+    return { isStateChange: false, fromState: "", toState: "", isCancellation: false, isSuspension: false, isReactivation: false };
+  }
+  const fromState = match[1].toLowerCase();
+  const toState = match[2].toLowerCase();
+  const isCancellation = EXPIRED_STATES.includes(toState);
+  const isSuspension = SUSPENDED_STATES.includes(toState);
+  const isReactivation = ACTIVE_STATES.includes(toState) && (EXPIRED_STATES.includes(fromState) || SUSPENDED_STATES.includes(fromState));
+  return { isStateChange: true, fromState, toState, isCancellation, isSuspension, isReactivation };
+}
+
 export interface ParsedNotificationResult {
   notification: {
     time: string;
@@ -24,7 +50,7 @@ export interface ParsedNotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation";
     details: string;
   };
 }
@@ -57,7 +83,11 @@ export async function POST(request: NextRequest) {
     const results: ParsedNotificationResult[] = [];
 
     for (const notification of notifications) {
+      // Parse the event for state changes (e.g. "State changed from Active to Expired")
+      const stateChange = parseStateChangeEvent(notification.event);
+
       // Try to find the subscription by Microsoft Subscription ID
+      // For state changes (expired/cancelled), also search non-ACTIVE subscriptions
       let subscription = null;
       if (notification.subscriptionId) {
         subscription = await prisma.subscription.findFirst({
@@ -81,16 +111,16 @@ export async function POST(request: NextRequest) {
           const product = await prisma.product.findFirst({
             where: {
               name: { contains: notification.product, mode: "insensitive" },
-              isActive: true,
             },
           });
 
           if (product) {
+            // For cancellations/expirations, also look for ACTIVE subscriptions to cancel
             subscription = await prisma.subscription.findFirst({
               where: {
                 customerId: customer.id,
                 productId: product.id,
-                status: "ACTIVE",
+                status: stateChange.isCancellation ? "ACTIVE" : "ACTIVE",
               },
               include: {
                 customer: true,
@@ -102,6 +132,44 @@ export async function POST(request: NextRequest) {
       }
 
       if (subscription) {
+        // Check for state change events FIRST (these take priority over seat comparisons)
+        if (stateChange.isStateChange && stateChange.isCancellation) {
+          results.push({
+            notification,
+            match: {
+              customerId: subscription.customerId,
+              customerName: subscription.customer.name,
+              subscriptionDbId: subscription.id,
+              productId: subscription.productId,
+              productName: subscription.product.name,
+              currentSeatCount: subscription.seatCount,
+              seatDifference: null,
+              status: "cancellation",
+              details: `Subscription EXPIRED/CANCELLED: ${subscription.product.name} (${subscription.seatCount} seats). Event: ${notification.event}. This subscription must be removed from billing.`,
+            },
+          });
+          continue;
+        }
+
+        if (stateChange.isStateChange && stateChange.isSuspension) {
+          results.push({
+            notification,
+            match: {
+              customerId: subscription.customerId,
+              customerName: subscription.customer.name,
+              subscriptionDbId: subscription.id,
+              productId: subscription.productId,
+              productName: subscription.product.name,
+              currentSeatCount: subscription.seatCount,
+              seatDifference: null,
+              status: "suspension",
+              details: `Subscription SUSPENDED: ${subscription.product.name} (${subscription.seatCount} seats). Event: ${notification.event}. Review billing — subscription may need to be paused.`,
+            },
+          });
+          continue;
+        }
+
+        // Normal seat comparison
         const seatDifference = notification.quantity - subscription.seatCount;
         const status = seatDifference === 0 ? "no_change" : "matched";
         let details = "";
@@ -139,7 +207,6 @@ export async function POST(request: NextRequest) {
         const product = await prisma.product.findFirst({
           where: {
             name: { contains: notification.product, mode: "insensitive" },
-            isActive: true,
           },
         });
 

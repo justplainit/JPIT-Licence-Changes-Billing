@@ -19,6 +19,7 @@ interface ApplyRequest {
   notificationTime: string;
   notificationEvent: string;
   notificationSubscriptionId: string;
+  applyType?: "seat_change" | "cancellation" | "suspension";
 }
 
 export async function POST(request: NextRequest) {
@@ -29,11 +30,11 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType } = body;
 
-    if (!subscriptionDbId || newQuantity === undefined || newQuantity === null) {
+    if (!subscriptionDbId) {
       return NextResponse.json(
-        { error: "subscriptionDbId and newQuantity are required" },
+        { error: "subscriptionDbId is required" },
         { status: 400 }
       );
     }
@@ -41,6 +42,181 @@ export async function POST(request: NextRequest) {
     const effectiveDate = notificationTime ? new Date(notificationTime) : new Date();
     // Use a valid date; fall back to now if parsing fails
     const changeDateObj = isNaN(effectiveDate.getTime()) ? new Date() : effectiveDate;
+
+    // ================================================================
+    // CANCELLATION / EXPIRY
+    // ================================================================
+    if (applyType === "cancellation" || applyType === "suspension") {
+      const result = await prisma.$transaction(async (tx) => {
+        const subscription = await tx.subscription.findUnique({
+          where: { id: subscriptionDbId },
+          include: { customer: true, product: true },
+        });
+
+        if (!subscription) {
+          throw new Error("Subscription not found");
+        }
+
+        // Get customer price for the product
+        const customerPrice = await tx.customerPrice.findFirst({
+          where: {
+            customerId: subscription.customerId,
+            productId: subscription.productId,
+            effectiveTo: null,
+          },
+          orderBy: { effectiveFrom: "desc" },
+        });
+
+        const pricePerSeat = customerPrice?.pricePerSeat ?? 0;
+        const currency = customerPrice?.currency ?? subscription.customer.currency ?? "ZAR";
+        const dateStr = format(changeDateObj, "d MMMM yyyy");
+        const monthName = format(changeDateObj, "MMMM yyyy");
+
+        const newStatus = applyType === "cancellation" ? "CANCELLED" : "SUSPENDED";
+        const previousMonthlyAmount = pricePerSeat * subscription.seatCount;
+
+        // Update subscription status
+        await tx.subscription.update({
+          where: { id: subscriptionDbId },
+          data: { status: newStatus },
+        });
+
+        // Create change record
+        const change = await tx.subscriptionChange.create({
+          data: {
+            subscriptionId: subscriptionDbId,
+            changeType: "CANCELLATION",
+            status: "APPLIED",
+            effectiveDate: changeDateObj,
+            previousSeatCount: subscription.seatCount,
+            newSeatCount: 0,
+            billingCurrency: currency,
+            notes: `Applied from Cloud-iQ notification. Event: ${notificationEvent}`,
+            createdById: session.user!.id!,
+          },
+        });
+
+        // Close any open 7-day windows
+        await tx.sevenDayWindow.updateMany({
+          where: { subscriptionId: subscriptionDbId, isClosed: false },
+          data: { isClosed: true },
+        });
+
+        // Cancel any pending scheduled changes
+        await tx.scheduledChange.updateMany({
+          where: { subscriptionId: subscriptionDbId, status: "PENDING" },
+          data: { status: "CANCELLED" },
+        });
+
+        const amendmentItems: Array<{
+          description: string;
+          productName: string;
+          newMonthlyAmount: number;
+          newSeatCount: number;
+          actionByDate: Date;
+          reason: string;
+        }> = [];
+
+        if (applyType === "cancellation") {
+          // Task: Remove from repeating invoice
+          amendmentItems.push({
+            description: [
+              `REMOVE LINE ITEM FROM REPEATING INVOICE for ${subscription.customer.name} in Xero`,
+              ``,
+              `Product: ${subscription.product.name}`,
+              `Seats being removed: ${subscription.seatCount}`,
+              `Monthly amount to remove: ${formatCurrency(previousMonthlyAmount, currency)}`,
+              `Expired on: ${dateStr}`,
+              ``,
+              `Steps:`,
+              `  1. Open the repeating invoice for ${subscription.customer.name} in Xero`,
+              `  2. DELETE the line item for "${subscription.product.name}" (${subscription.seatCount} × ${formatCurrency(pricePerSeat, currency)} = ${formatCurrency(previousMonthlyAmount, currency)}/month)`,
+              `  3. If this was their only product, CANCEL the entire repeating invoice`,
+              `  4. Save the repeating invoice`,
+              ``,
+              `Note: If ${monthName} has already been invoiced, no credit note is needed`,
+              `unless the customer paid for a period beyond the expiry date.`,
+            ].join("\n"),
+            productName: subscription.product.name,
+            newMonthlyAmount: 0,
+            newSeatCount: 0,
+            actionByDate: changeDateObj,
+            reason: `Subscription expired: ${subscription.product.name} (${subscription.seatCount} seats) – ${subscription.customer.name}`,
+          });
+        } else {
+          // Suspension — review needed
+          amendmentItems.push({
+            description: [
+              `REVIEW SUSPENDED SUBSCRIPTION for ${subscription.customer.name}`,
+              ``,
+              `Product: ${subscription.product.name}`,
+              `Seats: ${subscription.seatCount}`,
+              `Monthly amount: ${formatCurrency(previousMonthlyAmount, currency)}`,
+              `Suspended on: ${dateStr}`,
+              ``,
+              `Action required:`,
+              `  1. Investigate why the subscription was suspended`,
+              `  2. Contact the customer if needed`,
+              `  3. If suspension is permanent, remove the line item from the repeating invoice in Xero`,
+              `  4. If temporary, no billing changes needed — but monitor for reactivation`,
+            ].join("\n"),
+            productName: subscription.product.name,
+            newMonthlyAmount: previousMonthlyAmount,
+            newSeatCount: subscription.seatCount,
+            actionByDate: changeDateObj,
+            reason: `Subscription suspended: ${subscription.product.name} – ${subscription.customer.name}`,
+          });
+        }
+
+        for (const item of amendmentItems) {
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              ...item,
+            },
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            userId: session.user!.id!,
+            action: applyType === "cancellation" ? "CLOUD_IQ_APPLY_CANCELLATION" : "CLOUD_IQ_APPLY_SUSPENSION",
+            entityType: "Subscription",
+            entityId: subscriptionDbId,
+            details: `Cloud-iQ: Subscription ${newStatus.toLowerCase()} – ${subscription.product.name} (${subscription.seatCount} seats) for ${subscription.customer.name}. Event: ${notificationEvent}`,
+            xeroInstructionsGen: true,
+          },
+        });
+
+        return {
+          changeType: "CANCELLATION" as const,
+          applyType,
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          previousSeatCount: subscription.seatCount,
+          newSeatCount: 0,
+          previousMonthlyAmount,
+          currency,
+          tasks: amendmentItems.map((a) => ({
+            description: a.description,
+            actionByDate: a.actionByDate.toISOString(),
+            reason: a.reason,
+          })),
+        };
+      });
+
+      return NextResponse.json(result, { status: 201 });
+    }
+
+    // ================================================================
+    // SEAT CHANGES (existing logic below)
+    // ================================================================
+    if (newQuantity === undefined || newQuantity === null) {
+      return NextResponse.json(
+        { error: "newQuantity is required for seat changes" },
+        { status: 400 }
+      );
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       const subscription = await tx.subscription.findUnique({

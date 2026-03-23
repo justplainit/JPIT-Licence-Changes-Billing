@@ -25,15 +25,17 @@ interface NotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation";
     details: string;
   };
 }
 
 interface ApplyResult {
-  changeType: "ADD_SEATS" | "REMOVE_SEATS";
+  changeType: "ADD_SEATS" | "REMOVE_SEATS" | "CANCELLATION";
+  applyType?: "cancellation" | "suspension" | "seat_change";
   customerName: string;
   productName: string;
+  previousMonthlyAmount?: number;
   previousSeatCount: number;
   newSeatCount: number;
   proRataAmount?: number;
@@ -112,13 +114,15 @@ export default function CloudIQPage() {
   };
 
   const handleApply = async (index: number, result: NotificationResult) => {
-    if (
-      !result.match.subscriptionDbId ||
-      result.match.seatDifference === null ||
-      result.match.seatDifference === 0
-    ) {
-      return;
-    }
+    if (!result.match.subscriptionDbId) return;
+
+    const isCancellation = result.match.status === "cancellation";
+    const isSuspension = result.match.status === "suspension";
+    const isSeatChange = result.match.status === "matched" &&
+      result.match.seatDifference !== null &&
+      result.match.seatDifference !== 0;
+
+    if (!isCancellation && !isSuspension && !isSeatChange) return;
 
     setApplyingIndex(index);
     try {
@@ -131,6 +135,7 @@ export default function CloudIQPage() {
           notificationTime: result.notification.time,
           notificationEvent: result.notification.event,
           notificationSubscriptionId: result.notification.subscriptionId,
+          applyType: isCancellation ? "cancellation" : isSuspension ? "suspension" : "seat_change",
         }),
       });
 
@@ -164,6 +169,9 @@ export default function CloudIQPage() {
     no_change: "bg-gray-50 border-gray-200",
     partial: "bg-amber-50 border-amber-200",
     new: "bg-red-50 border-red-200",
+    cancellation: "bg-red-50 border-red-300",
+    suspension: "bg-orange-50 border-orange-200",
+    reactivation: "bg-green-50 border-green-200",
   };
 
   const statusLabels: Record<string, string> = {
@@ -171,6 +179,9 @@ export default function CloudIQPage() {
     no_change: "No Change",
     partial: "Partial Match",
     new: "Not Found",
+    cancellation: "Expired / Cancelled",
+    suspension: "Suspended",
+    reactivation: "Reactivated",
   };
 
   const statusBadgeColors: Record<string, string> = {
@@ -178,6 +189,9 @@ export default function CloudIQPage() {
     no_change: "bg-gray-100 text-gray-800",
     partial: "bg-amber-100 text-amber-800",
     new: "bg-red-100 text-red-800",
+    cancellation: "bg-red-200 text-red-900",
+    suspension: "bg-orange-100 text-orange-800",
+    reactivation: "bg-green-100 text-green-800",
   };
 
   return (
@@ -240,6 +254,10 @@ export default function CloudIQPage() {
               <span className="rounded-full bg-amber-100 px-2 py-1 text-amber-800">
                 {results.filter((r) => r.match.status === "partial").length}{" "}
                 Partial
+              </span>
+              <span className="rounded-full bg-red-200 px-2 py-1 text-red-900">
+                {results.filter((r) => r.match.status === "cancellation").length}{" "}
+                Expired
               </span>
               <span className="rounded-full bg-red-100 px-2 py-1 text-red-800">
                 {results.filter((r) => r.match.status === "new").length} New
@@ -343,6 +361,23 @@ export default function CloudIQPage() {
                       </p>
                     )}
 
+                  {/* Cancellation/Expiry display */}
+                  {(result.match.status === "cancellation" || result.match.status === "suspension") &&
+                    result.match.currentSeatCount !== null && (
+                      <div className="rounded-md bg-white/70 p-3 text-sm">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-xs text-slate-500">Product</p>
+                            <p className="font-medium text-slate-900">{result.match.productName}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-slate-500">Seats to remove from billing</p>
+                            <p className="text-lg font-bold text-red-600">{result.match.currentSeatCount}</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                   {/* Match details */}
                   <p className="text-xs text-slate-500">
                     {result.match.details}
@@ -363,7 +398,7 @@ export default function CloudIQPage() {
                   )}
                 </div>
 
-                {/* Action button */}
+                {/* Action button for seat changes */}
                 {result.match.status === "matched" &&
                   result.match.seatDifference !== null &&
                   result.match.seatDifference !== 0 &&
@@ -380,15 +415,51 @@ export default function CloudIQPage() {
                       </Button>
                     </div>
                   )}
+
+                {/* Action button for cancellation/expiry */}
+                {result.match.status === "cancellation" &&
+                  !appliedResults[index] && (
+                    <div className="ml-4">
+                      <Button
+                        onClick={() => handleApply(index, result)}
+                        disabled={applyingIndex === index}
+                        className="bg-red-600 hover:bg-red-700 text-white"
+                      >
+                        {applyingIndex === index
+                          ? "Applying..."
+                          : "Apply Cancellation"}
+                      </Button>
+                    </div>
+                  )}
+
+                {/* Action button for suspension */}
+                {result.match.status === "suspension" &&
+                  !appliedResults[index] && (
+                    <div className="ml-4">
+                      <Button
+                        onClick={() => handleApply(index, result)}
+                        disabled={applyingIndex === index}
+                        className="bg-orange-600 hover:bg-orange-700 text-white"
+                      >
+                        {applyingIndex === index
+                          ? "Applying..."
+                          : "Apply Suspension"}
+                      </Button>
+                    </div>
+                  )}
               </div>
 
               {/* Applied result: Tasks for accounting */}
               {appliedResults[index] && (
                 <div className="mt-4 space-y-3 border-t border-green-200 pt-4">
                   {/* Summary */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-semibold text-green-800">
-                      Change applied successfully
+                      {appliedResults[index].changeType === "CANCELLATION"
+                        ? (appliedResults[index].applyType === "suspension"
+                          ? "Suspension recorded"
+                          : "Cancellation applied — subscription marked as cancelled")
+                        : "Change applied successfully"}
                     </span>
                     {appliedResults[index].proRataAmount !== undefined && (
                       <span className="text-xs rounded-full bg-green-100 px-2 py-0.5 text-green-700">
@@ -398,6 +469,12 @@ export default function CloudIQPage() {
                     {appliedResults[index].creditAmount !== undefined && (
                       <span className="text-xs rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
                         Credit: R{appliedResults[index].creditAmount!.toFixed(2)}
+                      </span>
+                    )}
+                    {appliedResults[index].previousMonthlyAmount !== undefined &&
+                      appliedResults[index].previousMonthlyAmount! > 0 && (
+                      <span className="text-xs rounded-full bg-red-100 px-2 py-0.5 text-red-700">
+                        Remove R{appliedResults[index].previousMonthlyAmount!.toFixed(2)}/mo from billing
                       </span>
                     )}
                     {appliedResults[index].scheduledFor && (

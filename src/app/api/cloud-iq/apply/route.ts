@@ -1,0 +1,527 @@
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { auth } from "@/lib/auth";
+import { format } from "date-fns";
+import {
+  calculateProRata,
+  calculateSeatReductionCredit,
+  calculate7DayWindow,
+  formatCurrency,
+} from "@/lib/billing-calculations";
+import {
+  generateProRataInvoiceDraft,
+  generateCreditNoteDraft,
+} from "@/lib/invoice-generator";
+
+interface ApplyRequest {
+  subscriptionDbId: string;
+  newQuantity: number;
+  notificationTime: string;
+  notificationEvent: string;
+  notificationSubscriptionId: string;
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const session = await auth();
+    if (!session?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const body: ApplyRequest = await request.json();
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId } = body;
+
+    if (!subscriptionDbId || newQuantity === undefined || newQuantity === null) {
+      return NextResponse.json(
+        { error: "subscriptionDbId and newQuantity are required" },
+        { status: 400 }
+      );
+    }
+
+    const effectiveDate = notificationTime ? new Date(notificationTime) : new Date();
+    // Use a valid date; fall back to now if parsing fails
+    const changeDateObj = isNaN(effectiveDate.getTime()) ? new Date() : effectiveDate;
+
+    const result = await prisma.$transaction(async (tx) => {
+      const subscription = await tx.subscription.findUnique({
+        where: { id: subscriptionDbId },
+        include: {
+          customer: true,
+          product: true,
+          sevenDayWindows: {
+            where: {
+              isClosed: false,
+              closesAt: { gte: new Date() },
+            },
+            orderBy: { closesAt: "desc" },
+          },
+        },
+      });
+
+      if (!subscription) {
+        throw new Error("Subscription not found");
+      }
+
+      const seatDifference = newQuantity - subscription.seatCount;
+
+      if (seatDifference === 0) {
+        throw new Error("No seat change detected");
+      }
+
+      // Update the Microsoft Subscription ID if we have one and it's not set yet
+      if (notificationSubscriptionId && !subscription.microsoftSubId) {
+        await tx.subscription.update({
+          where: { id: subscriptionDbId },
+          data: { microsoftSubId: notificationSubscriptionId },
+        });
+      }
+
+      // Get customer price
+      const customerPrice = await tx.customerPrice.findFirst({
+        where: {
+          customerId: subscription.customerId,
+          productId: subscription.productId,
+          effectiveTo: null,
+        },
+        orderBy: { effectiveFrom: "desc" },
+      });
+
+      const pricePerSeat = customerPrice?.pricePerSeat ?? 0;
+      const currency = customerPrice?.currency ?? subscription.customer.currency ?? "ZAR";
+      const dateStr = format(changeDateObj, "d MMMM yyyy");
+      const monthName = format(changeDateObj, "MMMM");
+      const nextMonthDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+      const nextMonthName = format(nextMonthDate, "MMMM yyyy");
+
+      const amendmentItems: Array<{
+        description: string;
+        productName: string;
+        newMonthlyAmount: number;
+        newSeatCount: number;
+        actionByDate: Date;
+        reason: string;
+      }> = [];
+
+      // ================================================================
+      // SEAT INCREASE
+      // ================================================================
+      if (seatDifference > 0) {
+        const previousSeatCount = subscription.seatCount;
+        const additionalSeats = seatDifference;
+
+        const proRata = calculateProRata({
+          pricePerSeat,
+          additionalSeats,
+          changeDate: changeDateObj,
+          currency,
+        });
+
+        // Update subscription
+        await tx.subscription.update({
+          where: { id: subscriptionDbId },
+          data: { seatCount: newQuantity },
+        });
+
+        // Create change record
+        const change = await tx.subscriptionChange.create({
+          data: {
+            subscriptionId: subscriptionDbId,
+            changeType: "ADD_SEATS",
+            status: "APPLIED",
+            effectiveDate: changeDateObj,
+            previousSeatCount,
+            newSeatCount: newQuantity,
+            proRataAmount: proRata.totalAmount,
+            proRataDays: proRata.daysRemaining,
+            proRataDailyRate: proRata.dailyRate,
+            billingCurrency: currency,
+            notes: `Applied from Cloud-iQ notification. Event: ${notificationEvent}`,
+            createdById: session.user!.id!,
+          },
+        });
+
+        // 7-day window
+        const { opensAt, closesAt } = calculate7DayWindow(changeDateObj);
+        await tx.sevenDayWindow.create({
+          data: {
+            subscriptionId: subscriptionDbId,
+            changeId: change.id,
+            windowType: "MID_TERM_ADDITION",
+            opensAt,
+            closesAt,
+            seatsAffected: additionalSeats,
+          },
+        });
+
+        // Invoice draft
+        const invoiceDraftOutput = generateProRataInvoiceDraft({
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          pricePerSeat,
+          additionalSeats,
+          changeDate: changeDateObj,
+          currentSeatCount: previousSeatCount,
+          currency,
+        });
+
+        await tx.invoiceDraft.create({
+          data: {
+            customerId: subscription.customerId,
+            changeId: change.id,
+            draftType: "PRO_RATA",
+            invoiceDate: changeDateObj,
+            totalAmount: invoiceDraftOutput.totalAmount,
+            currency,
+            notes: invoiceDraftOutput.notes.join("\n"),
+            lineItems: {
+              create: invoiceDraftOutput.lineItems.map((item, index) => ({
+                description: item.description,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                lineTotal: item.lineTotal,
+                calculationBreakdown: item.calculationBreakdown,
+                sortOrder: index,
+              })),
+            },
+          },
+        });
+
+        // ---- AMENDMENT TASKS WITH EXACT INSTRUCTIONS ----
+
+        // Task 1: Send pro-rata invoice NOW
+        amendmentItems.push({
+          description: [
+            `SEND ONE-TIME PRO-RATA INVOICE to ${subscription.customer.name}`,
+            ``,
+            `Amount: ${formatCurrency(proRata.totalAmount, currency)} (incl. VAT to be added)`,
+            `Product: ${subscription.product.name}`,
+            `Reason: ${additionalSeats} additional seat${additionalSeats !== 1 ? "s" : ""} added on ${dateStr}`,
+            `Period: ${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")}`,
+            ``,
+            `Calculation:`,
+            `  Rate per seat: ${formatCurrency(pricePerSeat, currency)}/month`,
+            `  Daily rate: ${formatCurrency(proRata.dailyRate, currency)} (${formatCurrency(pricePerSeat, currency)} ÷ ${proRata.daysInMonth} days)`,
+            `  Days remaining: ${proRata.daysRemaining}`,
+            `  Per seat: ${formatCurrency(proRata.perSeatProRata, currency)}`,
+            `  Total: ${formatCurrency(proRata.perSeatProRata, currency)} × ${additionalSeats} = ${formatCurrency(proRata.totalAmount, currency)}`,
+            ``,
+            `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: proRata.totalAmount,
+          newSeatCount: additionalSeats,
+          actionByDate: changeDateObj,
+          reason: `Pro-rata invoice for ${additionalSeats} new seat${additionalSeats !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+        });
+
+        // Task 2: Update repeating invoice from next month
+        const newMonthlyTotal = pricePerSeat * newQuantity;
+        amendmentItems.push({
+          description: [
+            `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
+            ``,
+            `Product: ${subscription.product.name}`,
+            `Change: ${previousSeatCount} seats → ${newQuantity} seats`,
+            `New monthly amount: ${formatCurrency(newMonthlyTotal, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+            `Effective from: 1 ${nextMonthName}`,
+            ``,
+            `DO NOT change the current month's repeating invoice – it has already been billed.`,
+            `Only update the repeating invoice so that from 1 ${nextMonthName} it reflects ${newQuantity} seats.`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: newMonthlyTotal,
+          newSeatCount: newQuantity,
+          actionByDate: nextMonthDate,
+          reason: `Seat increase: ${previousSeatCount} → ${newQuantity} effective ${dateStr}`,
+        });
+
+        // Audit log
+        await tx.auditLog.create({
+          data: {
+            userId: session.user!.id!,
+            action: "CLOUD_IQ_APPLY_ADD_SEATS",
+            entityType: "Subscription",
+            entityId: subscriptionDbId,
+            details: `Cloud-iQ: Added ${additionalSeats} seats (${previousSeatCount} → ${newQuantity}). Pro rata: ${formatCurrency(proRata.totalAmount, currency)}. Event: ${notificationEvent}`,
+            proRataAmount: proRata.totalAmount,
+            sevenDayWindowOpen: true,
+            xeroInstructionsGen: true,
+          },
+        });
+
+        // Create amendment queue items
+        for (const item of amendmentItems) {
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              ...item,
+            },
+          });
+        }
+
+        return {
+          changeType: "ADD_SEATS" as const,
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          proRataAmount: proRata.totalAmount,
+          currency,
+          tasks: amendmentItems.map((a) => ({
+            description: a.description,
+            actionByDate: a.actionByDate.toISOString(),
+            reason: a.reason,
+          })),
+          invoiceDraft: invoiceDraftOutput.formattedDraft,
+        };
+      }
+
+      // ================================================================
+      // SEAT DECREASE
+      // ================================================================
+      const seatsRemoved = subscription.seatCount - newQuantity;
+      const previousSeatCount = subscription.seatCount;
+
+      // Check for open 7-day window
+      const openWindow = subscription.sevenDayWindows.length > 0
+        ? subscription.sevenDayWindows[0]
+        : null;
+
+      if (openWindow) {
+        // Within 7-day window: immediate with credit
+        await tx.subscription.update({
+          where: { id: subscriptionDbId },
+          data: { seatCount: newQuantity },
+        });
+
+        const creditResult = calculateSeatReductionCredit({
+          pricePerSeat,
+          seatsRemoved,
+          reductionDate: changeDateObj,
+        });
+
+        const change = await tx.subscriptionChange.create({
+          data: {
+            subscriptionId: subscriptionDbId,
+            changeType: "REMOVE_SEATS",
+            status: "APPLIED",
+            effectiveDate: changeDateObj,
+            previousSeatCount,
+            newSeatCount: newQuantity,
+            proRataAmount: -creditResult.totalCredit,
+            proRataDays: creditResult.daysRemaining,
+            proRataDailyRate: creditResult.dailyRate,
+            billingCurrency: currency,
+            notes: `Applied from Cloud-iQ notification (within 7-day window). Event: ${notificationEvent}`,
+            createdById: session.user!.id!,
+          },
+        });
+
+        const creditNoteDraft = generateCreditNoteDraft({
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          pricePerSeat,
+          seatsRemoved,
+          reductionDate: changeDateObj,
+          currency,
+        });
+
+        await tx.invoiceDraft.create({
+          data: {
+            customerId: subscription.customerId,
+            changeId: change.id,
+            draftType: "CREDIT_NOTE",
+            invoiceDate: changeDateObj,
+            totalAmount: creditNoteDraft.totalAmount,
+            currency,
+            notes: creditNoteDraft.notes.join("\n"),
+            lineItems: {
+              create: creditNoteDraft.lineItems.map((item, index) => ({
+                description: item.description,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                lineTotal: item.lineTotal,
+                calculationBreakdown: item.calculationBreakdown,
+                sortOrder: index,
+              })),
+            },
+          },
+        });
+
+        // Task 1: Issue credit note
+        amendmentItems.push({
+          description: [
+            `ISSUE CREDIT NOTE to ${subscription.customer.name}`,
+            ``,
+            `Amount: ${formatCurrency(creditResult.totalCredit, currency)}`,
+            `Product: ${subscription.product.name}`,
+            `Reason: ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} removed on ${dateStr} (within 7-day cancellation window)`,
+            `Period: ${format(creditResult.periodStart, "d MMM")} – ${format(creditResult.periodEnd, "d MMM yyyy")}`,
+            ``,
+            `Create a credit note in Xero for the unused portion of ${monthName}.`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: -creditResult.totalCredit,
+          newSeatCount: seatsRemoved,
+          actionByDate: changeDateObj,
+          reason: `Credit note for ${seatsRemoved} removed seat${seatsRemoved !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+        });
+
+        // Task 2: Update repeating invoice
+        const newMonthlyTotal = pricePerSeat * newQuantity;
+        amendmentItems.push({
+          description: [
+            `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
+            ``,
+            `Product: ${subscription.product.name}`,
+            `Change: ${previousSeatCount} seats → ${newQuantity} seats`,
+            `New monthly amount: ${formatCurrency(newMonthlyTotal, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+            `Effective from: 1 ${nextMonthName}`,
+            ``,
+            `Update the repeating invoice so that from 1 ${nextMonthName} it reflects ${newQuantity} seats.`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: newMonthlyTotal,
+          newSeatCount: newQuantity,
+          actionByDate: nextMonthDate,
+          reason: `Seat decrease: ${previousSeatCount} → ${newQuantity} effective ${dateStr}`,
+        });
+
+        for (const item of amendmentItems) {
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              ...item,
+            },
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            userId: session.user!.id!,
+            action: "CLOUD_IQ_APPLY_REMOVE_SEATS",
+            entityType: "Subscription",
+            entityId: subscriptionDbId,
+            details: `Cloud-iQ: Removed ${seatsRemoved} seats within 7-day window (${previousSeatCount} → ${newQuantity}). Credit: ${formatCurrency(creditResult.totalCredit, currency)}. Event: ${notificationEvent}`,
+            proRataAmount: -creditResult.totalCredit,
+            sevenDayWindowOpen: true,
+            xeroInstructionsGen: true,
+          },
+        });
+
+        return {
+          changeType: "REMOVE_SEATS" as const,
+          withinWindow: true,
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          creditAmount: creditResult.totalCredit,
+          currency,
+          tasks: amendmentItems.map((a) => ({
+            description: a.description,
+            actionByDate: a.actionByDate.toISOString(),
+            reason: a.reason,
+          })),
+          invoiceDraft: creditNoteDraft.formattedDraft,
+        };
+      }
+
+      // Outside 7-day window: schedule for renewal
+      const change = await tx.subscriptionChange.create({
+        data: {
+          subscriptionId: subscriptionDbId,
+          changeType: "REMOVE_SEATS",
+          status: "SCHEDULED",
+          effectiveDate: subscription.renewalDate,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          billingCurrency: currency,
+          notes: `Applied from Cloud-iQ notification (outside 7-day window – scheduled for renewal). Event: ${notificationEvent}`,
+          createdById: session.user!.id!,
+        },
+      });
+
+      await tx.scheduledChange.create({
+        data: {
+          subscriptionId: subscriptionDbId,
+          changeType: "REMOVE_SEATS",
+          scheduledDate: subscription.renewalDate,
+          targetSeatCount: newQuantity,
+          notes: `Cloud-iQ: Reduce seats from ${previousSeatCount} to ${newQuantity} at renewal`,
+        },
+      });
+
+      const renewalDateStr = format(subscription.renewalDate, "d MMMM yyyy");
+
+      // Task: Reduce at renewal
+      amendmentItems.push({
+        description: [
+          `SCHEDULED: REDUCE SEATS AT RENEWAL for ${subscription.customer.name}`,
+          ``,
+          `Product: ${subscription.product.name}`,
+          `Change: ${previousSeatCount} seats → ${newQuantity} seats (remove ${seatsRemoved})`,
+          `Renewal date: ${renewalDateStr}`,
+          ``,
+          `This reduction is outside the 7-day cancellation window.`,
+          `The customer will continue to be billed for ${previousSeatCount} seats until renewal.`,
+          ``,
+          `On ${renewalDateStr}:`,
+          `  1. Confirm the seat reduction has been applied in Partner Center / Crayon`,
+          `  2. Update the repeating invoice in Xero to ${newQuantity} seats`,
+          `  3. New monthly amount: ${formatCurrency(pricePerSeat * newQuantity, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+        ].join("\n"),
+        productName: subscription.product.name,
+        newMonthlyAmount: pricePerSeat * newQuantity,
+        newSeatCount: newQuantity,
+        actionByDate: subscription.renewalDate,
+        reason: `Scheduled seat decrease at renewal: ${previousSeatCount} → ${newQuantity}`,
+      });
+
+      for (const item of amendmentItems) {
+        await tx.amendmentQueueItem.create({
+          data: {
+            customerId: subscription.customerId,
+            isScheduledChange: true,
+            ...item,
+          },
+        });
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: session.user!.id!,
+          action: "CLOUD_IQ_APPLY_SCHEDULE_REMOVE_SEATS",
+          entityType: "Subscription",
+          entityId: subscriptionDbId,
+          details: `Cloud-iQ: Scheduled seat reduction (${previousSeatCount} → ${newQuantity}) for renewal ${renewalDateStr}. Outside 7-day window. Event: ${notificationEvent}`,
+          sevenDayWindowOpen: false,
+          scheduledChangeCreated: true,
+        },
+      });
+
+      return {
+        changeType: "REMOVE_SEATS" as const,
+        withinWindow: false,
+        customerName: subscription.customer.name,
+        productName: subscription.product.name,
+        previousSeatCount,
+        newSeatCount: newQuantity,
+        scheduledFor: renewalDateStr,
+        currency,
+        tasks: amendmentItems.map((a) => ({
+          description: a.description,
+          actionByDate: a.actionByDate.toISOString(),
+          reason: a.reason,
+        })),
+        message: `Seat reduction scheduled for renewal date: ${renewalDateStr}. Customer continues to be billed for ${previousSeatCount} seats until then.`,
+      };
+    });
+
+    return NextResponse.json(result, { status: 201 });
+  } catch (error) {
+    console.error("Error applying Cloud-iQ change:", error);
+    const message = error instanceof Error ? error.message : "Failed to apply change";
+    return NextResponse.json({ error: message }, { status: 400 });
+  }
+}

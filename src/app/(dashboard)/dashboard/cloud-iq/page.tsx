@@ -30,11 +30,35 @@ interface NotificationResult {
   };
 }
 
+interface ApplyResult {
+  changeType: "ADD_SEATS" | "REMOVE_SEATS";
+  customerName: string;
+  productName: string;
+  previousSeatCount: number;
+  newSeatCount: number;
+  proRataAmount?: number;
+  creditAmount?: number;
+  currency?: string;
+  withinWindow?: boolean;
+  scheduledFor?: string;
+  message?: string;
+  tasks: Array<{
+    description: string;
+    actionByDate: string;
+    reason: string;
+  }>;
+  invoiceDraft?: string;
+}
+
 export default function CloudIQPage() {
   const [text, setText] = useState("");
   const [results, setResults] = useState<NotificationResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [parsed, setParsed] = useState(false);
+  const [applyingIndex, setApplyingIndex] = useState<number | null>(null);
+  const [appliedResults, setAppliedResults] = useState<
+    Record<number, ApplyResult>
+  >({});
 
   const handleParse = async () => {
     if (!text.trim()) {
@@ -44,6 +68,7 @@ export default function CloudIQPage() {
 
     setLoading(true);
     setParsed(false);
+    setAppliedResults({});
     try {
       const res = await fetch("/api/cloud-iq/parse", {
         method: "POST",
@@ -86,10 +111,52 @@ export default function CloudIQPage() {
     }
   };
 
+  const handleApply = async (index: number, result: NotificationResult) => {
+    if (
+      !result.match.subscriptionDbId ||
+      result.match.seatDifference === null ||
+      result.match.seatDifference === 0
+    ) {
+      return;
+    }
+
+    setApplyingIndex(index);
+    try {
+      const res = await fetch("/api/cloud-iq/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subscriptionDbId: result.match.subscriptionDbId,
+          newQuantity: result.notification.quantity,
+          notificationTime: result.notification.time,
+          notificationEvent: result.notification.event,
+          notificationSubscriptionId: result.notification.subscriptionId,
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        toast.error(data.error || "Failed to apply change");
+        return;
+      }
+
+      setAppliedResults((prev) => ({ ...prev, [index]: data }));
+      toast.success(
+        `Change applied for ${result.match.customerName}. ${data.tasks.length} task(s) created for your accounting team.`
+      );
+    } catch {
+      toast.error("Failed to apply change");
+    } finally {
+      setApplyingIndex(null);
+    }
+  };
+
   const handleClear = () => {
     setText("");
     setResults([]);
     setParsed(false);
+    setAppliedResults({});
   };
 
   const statusColors: Record<string, string> = {
@@ -121,7 +188,7 @@ export default function CloudIQPage() {
         </h1>
         <p className="mt-1 text-sm text-slate-500">
           Paste Cloud-iQ (Crayon) change notification emails to detect licence
-          changes and compare against your subscriptions.
+          changes, apply them to the database, and generate billing tasks.
         </p>
       </div>
 
@@ -183,17 +250,27 @@ export default function CloudIQPage() {
           {results.map((result, index) => (
             <div
               key={index}
-              className={`rounded-lg border p-4 ${statusColors[result.match.status]}`}
+              className={`rounded-lg border p-4 ${
+                appliedResults[index]
+                  ? "bg-green-50 border-green-200"
+                  : statusColors[result.match.status]
+              }`}
             >
               <div className="flex items-start justify-between">
                 <div className="space-y-2 flex-1">
                   {/* Header */}
                   <div className="flex items-center gap-2">
-                    <span
-                      className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusBadgeColors[result.match.status]}`}
-                    >
-                      {statusLabels[result.match.status]}
-                    </span>
+                    {appliedResults[index] ? (
+                      <span className="rounded-full px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800">
+                        Applied
+                      </span>
+                    ) : (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs font-medium ${statusBadgeColors[result.match.status]}`}
+                      >
+                        {statusLabels[result.match.status]}
+                      </span>
+                    )}
                     <span className="text-xs text-slate-500">
                       {result.notification.time}
                     </span>
@@ -286,20 +363,98 @@ export default function CloudIQPage() {
                   )}
                 </div>
 
-                {/* Action button for matched changes */}
+                {/* Action button */}
                 {result.match.status === "matched" &&
                   result.match.seatDifference !== null &&
-                  result.match.seatDifference !== 0 && (
+                  result.match.seatDifference !== 0 &&
+                  !appliedResults[index] && (
                     <div className="ml-4">
-                      <a
-                        href="/dashboard/changes"
-                        className="inline-flex items-center rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+                      <Button
+                        onClick={() => handleApply(index, result)}
+                        disabled={applyingIndex === index}
+                        className="bg-green-600 hover:bg-green-700 text-white"
                       >
-                        Log Change
-                      </a>
+                        {applyingIndex === index
+                          ? "Applying..."
+                          : "Apply Change"}
+                      </Button>
                     </div>
                   )}
               </div>
+
+              {/* Applied result: Tasks for accounting */}
+              {appliedResults[index] && (
+                <div className="mt-4 space-y-3 border-t border-green-200 pt-4">
+                  {/* Summary */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-green-800">
+                      Change applied successfully
+                    </span>
+                    {appliedResults[index].proRataAmount !== undefined && (
+                      <span className="text-xs rounded-full bg-green-100 px-2 py-0.5 text-green-700">
+                        Pro-rata: R{appliedResults[index].proRataAmount!.toFixed(2)}
+                      </span>
+                    )}
+                    {appliedResults[index].creditAmount !== undefined && (
+                      <span className="text-xs rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
+                        Credit: R{appliedResults[index].creditAmount!.toFixed(2)}
+                      </span>
+                    )}
+                    {appliedResults[index].scheduledFor && (
+                      <span className="text-xs rounded-full bg-orange-100 px-2 py-0.5 text-orange-700">
+                        Scheduled: {appliedResults[index].scheduledFor}
+                      </span>
+                    )}
+                  </div>
+
+                  {appliedResults[index].message && (
+                    <p className="text-sm text-amber-700 bg-amber-50 rounded-md p-2">
+                      {appliedResults[index].message}
+                    </p>
+                  )}
+
+                  {/* Tasks */}
+                  <div>
+                    <h4 className="text-sm font-semibold text-slate-700 mb-2">
+                      Billing Tasks Created ({appliedResults[index].tasks.length})
+                    </h4>
+                    <div className="space-y-2">
+                      {appliedResults[index].tasks.map((task, taskIdx) => (
+                        <div
+                          key={taskIdx}
+                          className="rounded-md border border-slate-200 bg-white p-3"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              <pre className="text-xs text-slate-700 whitespace-pre-wrap font-sans leading-relaxed">
+                                {task.description}
+                              </pre>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <p className="text-xs font-medium text-slate-500">
+                                Action by
+                              </p>
+                              <p className="text-xs text-slate-700">
+                                {new Date(task.actionByDate).toLocaleDateString("en-ZA")}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-xs text-slate-500">
+                      These tasks have been added to the{" "}
+                      <a
+                        href="/dashboard/amendments"
+                        className="text-blue-600 underline hover:text-blue-800"
+                      >
+                        Amendment Queue
+                      </a>
+                      . Your accounting team can tick them off as they complete each action.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>

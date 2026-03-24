@@ -87,6 +87,20 @@ export default function CustomerDetailPage() {
   }>({ pricePerSeat: "", currency: "USD" });
   const [savingPrice, setSavingPrice] = useState(false);
 
+  // New subscription modal state
+  const [showNewSubModal, setShowNewSubModal] = useState(false);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [newSubForm, setNewSubForm] = useState({
+    productId: "",
+    termType: "ANNUAL",
+    billingFrequency: "MONTHLY",
+    seatCount: "1",
+    startDate: new Date().toISOString().split("T")[0],
+    autoRenew: "true",
+  });
+  const [savingNewSub, setSavingNewSub] = useState(false);
+
   const fetchCustomer = useCallback(async () => {
     try {
       setLoading(true);
@@ -213,6 +227,75 @@ export default function CustomerDetailPage() {
     }
   };
 
+  const openNewSubModal = async () => {
+    setShowNewSubModal(true);
+    setLoadingProducts(true);
+    try {
+      const res = await fetch("/api/products");
+      if (res.ok) {
+        const data = await res.json();
+        setProducts(data);
+        if (data.length > 0) {
+          setNewSubForm((prev) => ({ ...prev, productId: data[0].id }));
+        }
+      }
+    } finally {
+      setLoadingProducts(false);
+    }
+  };
+
+  const closeNewSubModal = () => {
+    setShowNewSubModal(false);
+    setNewSubForm({
+      productId: "",
+      termType: "ANNUAL",
+      billingFrequency: "MONTHLY",
+      seatCount: "1",
+      startDate: new Date().toISOString().split("T")[0],
+      autoRenew: "true",
+    });
+  };
+
+  const saveNewSubscription = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingNewSub(true);
+    setError(null);
+    try {
+      const seatCount = parseInt(newSubForm.seatCount, 10);
+      if (isNaN(seatCount) || seatCount < 1) {
+        throw new Error("Seat count must be at least 1");
+      }
+
+      const res = await fetch("/api/subscriptions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customerId,
+          productId: newSubForm.productId,
+          termType: newSubForm.termType,
+          billingFrequency: newSubForm.billingFrequency,
+          seatCount,
+          startDate: newSubForm.startDate,
+          autoRenew: newSubForm.autoRenew === "true",
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to create subscription");
+      }
+
+      closeNewSubModal();
+      setSuccessMsg("Subscription created successfully");
+      setTimeout(() => setSuccessMsg(null), 3000);
+      fetchCustomer();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create subscription");
+    } finally {
+      setSavingNewSub(false);
+    }
+  };
+
   const formatDate = (dateStr: string) =>
     new Date(dateStr).toLocaleDateString("en-ZA", {
       day: "numeric",
@@ -275,9 +358,14 @@ export default function CustomerDetailPage() {
 
       {/* Subscriptions */}
       <div>
-        <h2 className="text-lg font-semibold text-slate-900 mb-3">
-          Subscriptions ({customer.subscriptions.length})
-        </h2>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold text-slate-900">
+            Subscriptions ({customer.subscriptions.length})
+          </h2>
+          <Button size="sm" onClick={openNewSubModal}>
+            + New Subscription
+          </Button>
+        </div>
 
         {customer.subscriptions.length === 0 ? (
           <p className="text-sm text-slate-500">No subscriptions found.</p>
@@ -564,6 +652,158 @@ export default function CustomerDetailPage() {
           </div>
         )}
       </div>
+
+      {/* New Subscription Modal */}
+      {showNewSubModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-lg">
+            <div className="flex items-center justify-between p-4 border-b">
+              <h3 className="text-lg font-semibold text-slate-900">
+                New Subscription
+              </h3>
+              <button
+                onClick={closeNewSubModal}
+                className="text-slate-400 hover:text-slate-600 text-xl leading-none"
+              >
+                &times;
+              </button>
+            </div>
+            <form onSubmit={saveNewSubscription} className="p-4 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Product
+                </label>
+                {loadingProducts ? (
+                  <p className="text-sm text-slate-500">Loading products...</p>
+                ) : (
+                  <select
+                    value={newSubForm.productId}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({ ...prev, productId: e.target.value }))
+                    }
+                    required
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="" disabled>
+                      Select a product
+                    </option>
+                    {products.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.sku})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Term Type
+                  </label>
+                  <select
+                    value={newSubForm.termType}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({ ...prev, termType: e.target.value }))
+                    }
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="MONTHLY">Monthly</option>
+                    <option value="ANNUAL">Annual</option>
+                    <option value="THREE_YEAR">Three Year</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Billing Frequency
+                  </label>
+                  <select
+                    value={newSubForm.billingFrequency}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({
+                        ...prev,
+                        billingFrequency: e.target.value,
+                      }))
+                    }
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="MONTHLY">Monthly</option>
+                    <option value="ANNUAL">Annual</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Seat Count
+                  </label>
+                  <Input
+                    type="number"
+                    min="1"
+                    required
+                    value={newSubForm.seatCount}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({
+                        ...prev,
+                        seatCount: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Start Date
+                  </label>
+                  <Input
+                    type="date"
+                    required
+                    value={newSubForm.startDate}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({
+                        ...prev,
+                        startDate: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">
+                  Auto Renew
+                </label>
+                <select
+                  value={newSubForm.autoRenew}
+                  onChange={(e) =>
+                    setNewSubForm((prev) => ({
+                      ...prev,
+                      autoRenew: e.target.value,
+                    }))
+                  }
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value="true">Yes</option>
+                  <option value="false">No</option>
+                </select>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={closeNewSubModal}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={savingNewSub || !newSubForm.productId}>
+                  {savingNewSub ? "Creating..." : "Create Subscription"}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Pricing History */}
       {customer.prices.length > 0 && (

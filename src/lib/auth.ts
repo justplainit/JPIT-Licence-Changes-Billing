@@ -52,6 +52,23 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
   callbacks: {
+    authorized({ auth: session, request: { nextUrl } }) {
+      const isLoggedIn = !!session?.user;
+      const isOnDashboard = nextUrl.pathname.startsWith("/dashboard");
+      const isOnApi = nextUrl.pathname.startsWith("/api");
+      const isAuthApi = nextUrl.pathname.startsWith("/api/auth");
+
+      // Always allow auth API
+      if (isAuthApi) return true;
+
+      // Protect dashboard pages — redirect to login
+      if (isOnDashboard) return isLoggedIn;
+
+      // Protect API routes — return false (401)
+      if (isOnApi) return isLoggedIn;
+
+      return true;
+    },
     async jwt({ token, user }) {
       if (user) {
         token.id = user.id;

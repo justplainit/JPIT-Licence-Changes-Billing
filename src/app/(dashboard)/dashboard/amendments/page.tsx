@@ -13,6 +13,10 @@ interface Amendment {
   reason: string;
   isCompleted: boolean;
   completedAt: string | null;
+  proRataFraction: number | null;
+  proRataDays: number | null;
+  proRataDaysInMonth: number | null;
+  proRataAmount: number | null;
   customer: { id: string; name: string };
 }
 
@@ -112,6 +116,19 @@ export default function AmendmentsPage() {
                     <span>Seats: {item.newSeatCount}</span>
                     <span>Amount: R {item.newMonthlyAmount.toFixed(2)}/mo</span>
                   </div>
+                  {item.proRataFraction != null && (
+                    <div className="mt-1 rounded bg-blue-50 px-2 py-1 text-xs text-blue-800 inline-block">
+                      Pro-rata fraction: <span className="font-semibold">{item.proRataFraction.toFixed(2)}</span>
+                      <span className="text-blue-600 ml-1">
+                        ({item.proRataDays}/{item.proRataDaysInMonth} days)
+                      </span>
+                      {item.proRataAmount != null && (
+                        <span className="ml-2">
+                          = R {item.proRataAmount.toFixed(2)}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   <p className="text-xs text-slate-500">Reason: {item.reason}</p>
                   <p className={`text-xs font-medium ${isOverdue(item.actionByDate) && !item.isCompleted ? "text-red-600" : "text-slate-500"}`}>
                     Action by: {new Date(item.actionByDate).toLocaleDateString("en-ZA")}

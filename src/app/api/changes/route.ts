@@ -214,6 +214,10 @@ export async function POST(request: NextRequest) {
               newSeatCount,
               actionByDate: new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1),
               reason: `Mid-term seat addition: +${additionalSeats} seats effective ${changeDateObj.toISOString().split("T")[0]}`,
+              proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 100) / 100,
+              proRataDays: proRata.daysRemaining,
+              proRataDaysInMonth: proRata.daysInMonth,
+              proRataAmount: proRata.totalAmount,
             },
           });
 
@@ -487,6 +491,10 @@ export async function POST(request: NextRequest) {
               newSeatCount: subscription.seatCount,
               actionByDate: new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1),
               reason: `Product upgrade: ${subscription.product.name} → ${newProduct.name} effective ${changeDateObj.toISOString().split("T")[0]}`,
+              proRataFraction: Math.round((upgradeResult.charge.daysRemaining / upgradeResult.charge.daysInMonth) * 100) / 100,
+              proRataDays: upgradeResult.charge.daysRemaining,
+              proRataDaysInMonth: upgradeResult.charge.daysInMonth,
+              proRataAmount: upgradeResult.netAmount,
             },
           });
 

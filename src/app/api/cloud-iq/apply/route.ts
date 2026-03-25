@@ -19,7 +19,9 @@ interface ApplyRequest {
   notificationTime: string;
   notificationEvent: string;
   notificationSubscriptionId: string;
-  applyType?: "seat_change" | "cancellation" | "suspension";
+  applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
+  customerId?: string;
+  productId?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -30,7 +32,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
 
     if (!subscriptionDbId) {
       return NextResponse.json(
@@ -196,6 +198,239 @@ export async function POST(request: NextRequest) {
           previousSeatCount: subscription.seatCount,
           newSeatCount: 0,
           previousMonthlyAmount,
+          currency,
+          tasks: amendmentItems.map((a) => ({
+            description: a.description,
+            actionByDate: a.actionByDate.toISOString(),
+            reason: a.reason,
+          })),
+        };
+      });
+
+      return NextResponse.json(result, { status: 201 });
+    }
+
+    // ================================================================
+    // NEW SUBSCRIPTION
+    // ================================================================
+    if (applyType === "new_subscription") {
+      if (!customerId || !productId) {
+        return NextResponse.json(
+          { error: "customerId and productId are required for new subscriptions" },
+          { status: 400 }
+        );
+      }
+
+      const seatCount = newQuantity || 1;
+
+      const result = await prisma.$transaction(async (tx) => {
+        const customer = await tx.customer.findUnique({ where: { id: customerId } });
+        if (!customer) throw new Error("Customer not found");
+
+        const product = await tx.product.findUnique({ where: { id: productId } });
+        if (!product) throw new Error("Product not found");
+
+        // Calculate dates based on ANNUAL term
+        const startDate = changeDateObj;
+        const renewalDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
+        const termEndDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
+
+        // Create the subscription
+        const subscription = await tx.subscription.create({
+          data: {
+            customerId,
+            productId,
+            termType: "ANNUAL",
+            billingFrequency: "MONTHLY",
+            seatCount,
+            startDate,
+            renewalDate,
+            termEndDate,
+            autoRenew: true,
+            microsoftSubId: notificationSubscriptionId || null,
+          },
+          include: { customer: true, product: true },
+        });
+
+        // Create 7-day window
+        const { opensAt, closesAt } = calculate7DayWindow(startDate);
+        await tx.sevenDayWindow.create({
+          data: {
+            subscriptionId: subscription.id,
+            windowType: "NEW_SUBSCRIPTION",
+            opensAt,
+            closesAt,
+            seatsAffected: seatCount,
+          },
+        });
+
+        // Get customer price for the product
+        const customerPrice = await tx.customerPrice.findFirst({
+          where: {
+            customerId,
+            productId,
+            effectiveTo: null,
+          },
+          orderBy: { effectiveFrom: "desc" },
+        });
+
+        const pricePerSeat = customerPrice?.pricePerSeat ?? 0;
+        const currency = customerPrice?.currency ?? customer.currency ?? "ZAR";
+        const dateStr = format(changeDateObj, "d MMMM yyyy");
+        const nextMonthDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+        const nextMonthName = format(nextMonthDate, "MMMM yyyy");
+        const monthlyTotal = pricePerSeat * seatCount;
+
+        // Create change record
+        const change = await tx.subscriptionChange.create({
+          data: {
+            subscriptionId: subscription.id,
+            changeType: "NEW_SUBSCRIPTION",
+            status: "APPLIED",
+            effectiveDate: startDate,
+            previousSeatCount: 0,
+            newSeatCount: seatCount,
+            billingCurrency: currency,
+            notes: `Created from Cloud-iQ notification. Event: ${notificationEvent}`,
+            createdById: session.user!.id!,
+          },
+        });
+
+        const amendmentItems: Array<{
+          description: string;
+          productName: string;
+          newMonthlyAmount: number;
+          newSeatCount: number;
+          actionByDate: Date;
+          reason: string;
+          proRataFraction?: number;
+          proRataDays?: number;
+          proRataDaysInMonth?: number;
+          proRataAmount?: number;
+        }> = [];
+
+        // Calculate pro-rata for the remainder of the current month
+        const proRata = calculateProRata({
+          pricePerSeat,
+          additionalSeats: seatCount,
+          changeDate: changeDateObj,
+          currency,
+        });
+
+        // Generate invoice draft for pro-rata
+        if (pricePerSeat > 0) {
+          const invoiceDraftOutput = generateProRataInvoiceDraft({
+            customerName: customer.name,
+            productName: product.name,
+            pricePerSeat,
+            additionalSeats: seatCount,
+            changeDate: changeDateObj,
+            currentSeatCount: 0,
+            currency,
+          });
+
+          await tx.invoiceDraft.create({
+            data: {
+              customerId,
+              changeId: change.id,
+              draftType: "PRO_RATA",
+              invoiceDate: changeDateObj,
+              totalAmount: invoiceDraftOutput.totalAmount,
+              currency,
+              notes: invoiceDraftOutput.notes.join("\n"),
+              lineItems: {
+                create: invoiceDraftOutput.lineItems.map((item, index) => ({
+                  description: item.description,
+                  quantity: item.quantity,
+                  unitPrice: item.unitPrice,
+                  lineTotal: item.lineTotal,
+                  calculationBreakdown: item.calculationBreakdown,
+                  sortOrder: index,
+                })),
+              },
+            },
+          });
+        }
+
+        // Task 1: Send pro-rata invoice for the current month
+        amendmentItems.push({
+          description: [
+            `SEND ONE-TIME PRO-RATA INVOICE to ${customer.name}`,
+            ``,
+            `Amount: ${formatCurrency(proRata.totalAmount, currency)} (incl. VAT to be added)`,
+            `Product: ${product.name}`,
+            `Reason: New subscription – ${seatCount} seat${seatCount !== 1 ? "s" : ""} starting ${dateStr}`,
+            `Period: ${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")}`,
+            ``,
+            `Calculation:`,
+            `  Rate per seat: ${formatCurrency(pricePerSeat, currency)}/month`,
+            `  Daily rate: ${formatCurrency(proRata.dailyRate, currency)} (${formatCurrency(pricePerSeat, currency)} ÷ ${proRata.daysInMonth} days)`,
+            `  Days remaining: ${proRata.daysRemaining}`,
+            `  Per seat: ${formatCurrency(proRata.perSeatProRata, currency)}`,
+            `  Total: ${formatCurrency(proRata.perSeatProRata, currency)} × ${seatCount} = ${formatCurrency(proRata.totalAmount, currency)}`,
+            ``,
+            `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
+          ].join("\n"),
+          productName: product.name,
+          newMonthlyAmount: proRata.totalAmount,
+          newSeatCount: seatCount,
+          actionByDate: changeDateObj,
+          reason: `Pro-rata invoice for new subscription – ${customer.name}`,
+          proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 100) / 100,
+          proRataDays: proRata.daysRemaining,
+          proRataDaysInMonth: proRata.daysInMonth,
+          proRataAmount: proRata.totalAmount,
+        });
+
+        // Task 2: Add to repeating invoice from next month
+        amendmentItems.push({
+          description: [
+            `ADD TO REPEATING INVOICE for ${customer.name} in Xero`,
+            ``,
+            `Product: ${product.name}`,
+            `Seats: ${seatCount}`,
+            `Monthly amount: ${formatCurrency(monthlyTotal, currency)} (${seatCount} × ${formatCurrency(pricePerSeat, currency)})`,
+            `Effective from: 1 ${nextMonthName}`,
+            ``,
+            `Add a new line item to the repeating invoice (or create a new repeating invoice if one doesn't exist).`,
+          ].join("\n"),
+          productName: product.name,
+          newMonthlyAmount: monthlyTotal,
+          newSeatCount: seatCount,
+          actionByDate: nextMonthDate,
+          reason: `New subscription: ${product.name} (${seatCount} seats) – ${customer.name}`,
+        });
+
+        for (const item of amendmentItems) {
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId,
+              ...item,
+            },
+          });
+        }
+
+        // Audit log
+        await tx.auditLog.create({
+          data: {
+            userId: session.user!.id!,
+            action: "CLOUD_IQ_APPLY_NEW_SUBSCRIPTION",
+            entityType: "Subscription",
+            entityId: subscription.id,
+            details: `Cloud-iQ: Created new subscription – ${product.name} (${seatCount} seats) for ${customer.name}. Pro rata: ${formatCurrency(proRata.totalAmount, currency)}. Event: ${notificationEvent}`,
+            proRataAmount: proRata.totalAmount,
+            sevenDayWindowOpen: true,
+            xeroInstructionsGen: true,
+          },
+        });
+
+        return {
+          changeType: "NEW_SUBSCRIPTION" as const,
+          customerName: customer.name,
+          productName: product.name,
+          previousSeatCount: 0,
+          newSeatCount: seatCount,
+          proRataAmount: proRata.totalAmount,
           currency,
           tasks: amendmentItems.map((a) => ({
             description: a.description,

@@ -25,13 +25,13 @@ interface NotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
     details: string;
   };
 }
 
 interface ApplyResult {
-  changeType: "ADD_SEATS" | "REMOVE_SEATS" | "CANCELLATION";
+  changeType: "ADD_SEATS" | "REMOVE_SEATS" | "CANCELLATION" | "NEW_SUBSCRIPTION";
   applyType?: "cancellation" | "suspension" | "seat_change";
   customerName: string;
   productName: string;
@@ -114,15 +114,15 @@ export default function CloudIQPage() {
   };
 
   const handleApply = async (index: number, result: NotificationResult) => {
-    if (!result.match.subscriptionDbId) return;
-
     const isCancellation = result.match.status === "cancellation";
     const isSuspension = result.match.status === "suspension";
+    const isNewSubscription = result.match.status === "new_subscription";
     const isSeatChange = result.match.status === "matched" &&
       result.match.seatDifference !== null &&
       result.match.seatDifference !== 0;
 
-    if (!isCancellation && !isSuspension && !isSeatChange) return;
+    if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription) return;
+    if (!isNewSubscription && !result.match.subscriptionDbId) return;
 
     setApplyingIndex(index);
     try {
@@ -130,12 +130,16 @@ export default function CloudIQPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          subscriptionDbId: result.match.subscriptionDbId,
-          newQuantity: result.notification.quantity,
+          subscriptionDbId: result.match.subscriptionDbId || "",
+          newQuantity: result.notification.quantity || 1,
           notificationTime: result.notification.time,
           notificationEvent: result.notification.event,
           notificationSubscriptionId: result.notification.subscriptionId,
-          applyType: isCancellation ? "cancellation" : isSuspension ? "suspension" : "seat_change",
+          applyType: isNewSubscription ? "new_subscription" : isCancellation ? "cancellation" : isSuspension ? "suspension" : "seat_change",
+          ...(isNewSubscription && {
+            customerId: result.match.customerId,
+            productId: result.match.productId,
+          }),
         }),
       });
 
@@ -172,6 +176,7 @@ export default function CloudIQPage() {
     cancellation: "bg-red-50 border-red-300",
     suspension: "bg-orange-50 border-orange-200",
     reactivation: "bg-green-50 border-green-200",
+    new_subscription: "bg-emerald-50 border-emerald-200",
   };
 
   const statusLabels: Record<string, string> = {
@@ -182,6 +187,7 @@ export default function CloudIQPage() {
     cancellation: "Expired / Cancelled",
     suspension: "Suspended",
     reactivation: "Reactivated",
+    new_subscription: "New Subscription",
   };
 
   const statusBadgeColors: Record<string, string> = {
@@ -192,6 +198,7 @@ export default function CloudIQPage() {
     cancellation: "bg-red-200 text-red-900",
     suspension: "bg-orange-100 text-orange-800",
     reactivation: "bg-green-100 text-green-800",
+    new_subscription: "bg-emerald-100 text-emerald-800",
   };
 
   return (
@@ -258,6 +265,10 @@ export default function CloudIQPage() {
               <span className="rounded-full bg-red-200 px-2 py-1 text-red-900">
                 {results.filter((r) => r.match.status === "cancellation").length}{" "}
                 Expired
+              </span>
+              <span className="rounded-full bg-emerald-100 px-2 py-1 text-emerald-800">
+                {results.filter((r) => r.match.status === "new_subscription").length}{" "}
+                New Sub
               </span>
               <span className="rounded-full bg-red-100 px-2 py-1 text-red-800">
                 {results.filter((r) => r.match.status === "new").length} New
@@ -378,6 +389,22 @@ export default function CloudIQPage() {
                       </div>
                     )}
 
+                  {/* New subscription details */}
+                  {result.match.status === "new_subscription" && (
+                    <div className="rounded-md bg-white/70 p-3 text-sm">
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-xs text-slate-500">Product</p>
+                          <p className="font-medium text-slate-900">{result.match.productName}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-500">Quantity</p>
+                          <p className="text-lg font-bold text-emerald-600">{result.notification.quantity || 1} seat{(result.notification.quantity || 1) !== 1 ? "s" : ""}</p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Match details */}
                   <p className="text-xs text-slate-500">
                     {result.match.details}
@@ -447,6 +474,22 @@ export default function CloudIQPage() {
                       </Button>
                     </div>
                   )}
+
+                {/* Action button for new subscription */}
+                {result.match.status === "new_subscription" &&
+                  !appliedResults[index] && (
+                    <div className="ml-4">
+                      <Button
+                        onClick={() => handleApply(index, result)}
+                        disabled={applyingIndex === index}
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                      >
+                        {applyingIndex === index
+                          ? "Creating..."
+                          : "Create Subscription"}
+                      </Button>
+                    </div>
+                  )}
               </div>
 
               {/* Applied result: Tasks for accounting */}
@@ -455,11 +498,13 @@ export default function CloudIQPage() {
                   {/* Summary */}
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-semibold text-green-800">
-                      {appliedResults[index].changeType === "CANCELLATION"
-                        ? (appliedResults[index].applyType === "suspension"
-                          ? "Suspension recorded"
-                          : "Cancellation applied — subscription marked as cancelled")
-                        : "Change applied successfully"}
+                      {appliedResults[index].changeType === "NEW_SUBSCRIPTION"
+                        ? "Subscription created and billing tasks generated"
+                        : appliedResults[index].changeType === "CANCELLATION"
+                          ? (appliedResults[index].applyType === "suspension"
+                            ? "Suspension recorded"
+                            : "Cancellation applied — subscription marked as cancelled")
+                          : "Change applied successfully"}
                     </span>
                     {appliedResults[index].proRataAmount !== undefined && (
                       <span className="text-xs rounded-full bg-green-100 px-2 py-0.5 text-green-700">

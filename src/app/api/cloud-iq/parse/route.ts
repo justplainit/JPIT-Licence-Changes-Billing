@@ -50,7 +50,7 @@ export interface ParsedNotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
     details: string;
   };
 }
@@ -212,6 +212,10 @@ export async function POST(request: NextRequest) {
 
         const hasAnyMatch = customer || product;
 
+        // Check if this is a "New subscription was created" event with both customer and product found
+        const isNewSubscriptionEvent = /new subscription.*was created/i.test(notification.event);
+        const isNewSub = isNewSubscriptionEvent && customer && product;
+
         results.push({
           notification,
           match: {
@@ -222,10 +226,12 @@ export async function POST(request: NextRequest) {
             productName: product?.name ?? null,
             currentSeatCount: null,
             seatDifference: null,
-            status: hasAnyMatch ? "partial" : "new",
-            details: hasAnyMatch
-              ? `Partial match: ${customer ? "Customer found" : "Customer not found"}, ${product ? "Product found" : "Product not found"}. No matching active subscription.`
-              : `No matching customer or product found. Customer: "${notification.cloudAccount}", Product: "${notification.product}"`,
+            status: isNewSub ? "new_subscription" : hasAnyMatch ? "partial" : "new",
+            details: isNewSub
+              ? `New subscription detected: ${customer!.name} – ${product!.name}. Ready to create subscription and set up billing.`
+              : hasAnyMatch
+                ? `Partial match: ${customer ? "Customer found" : "Customer not found"}, ${product ? "Product found" : "Product not found"}. No matching active subscription.`
+                : `No matching customer or product found. Customer: "${notification.cloudAccount}", Product: "${notification.product}"`,
           },
         });
       }

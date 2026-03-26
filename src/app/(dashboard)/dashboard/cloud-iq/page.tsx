@@ -40,6 +40,7 @@ interface ApplyResult {
   newSeatCount: number;
   proRataAmount?: number;
   creditAmount?: number;
+  isGracePeriodReversal?: boolean;
   currency?: string;
   withinWindow?: boolean;
   scheduledFor?: string;
@@ -498,13 +499,15 @@ export default function CloudIQPage() {
                   {/* Summary */}
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-sm font-semibold text-green-800">
-                      {appliedResults[index].changeType === "NEW_SUBSCRIPTION"
-                        ? "Subscription created and billing tasks generated"
-                        : appliedResults[index].changeType === "CANCELLATION"
-                          ? (appliedResults[index].applyType === "suspension"
-                            ? "Suspension recorded"
-                            : "Cancellation applied — subscription marked as cancelled")
-                          : "Change applied successfully"}
+                      {appliedResults[index].isGracePeriodReversal
+                        ? "Grace period reversal — no billing changes needed"
+                        : appliedResults[index].changeType === "NEW_SUBSCRIPTION"
+                          ? "Subscription created and billing tasks generated"
+                          : appliedResults[index].changeType === "CANCELLATION"
+                            ? (appliedResults[index].applyType === "suspension"
+                              ? "Suspension recorded"
+                              : "Cancellation applied — subscription marked as cancelled")
+                            : "Change applied successfully"}
                     </span>
                     {appliedResults[index].proRataAmount !== undefined && (
                       <span className="text-xs rounded-full bg-green-100 px-2 py-0.5 text-green-700">

@@ -699,7 +699,129 @@ export async function POST(request: NextRequest) {
         : null;
 
       if (openWindow) {
-        // Within 7-day window: immediate with credit
+        // ----- Check if this is a FULL REVERSAL (grace period cancellation) -----
+        // Look up the original change that created this 7-day window to find the
+        // seat count BEFORE the addition.
+        const originalChange = openWindow.changeId
+          ? await tx.subscriptionChange.findUnique({ where: { id: openWindow.changeId } })
+          : null;
+        const priorSeatCount = originalChange?.previousSeatCount ?? null;
+        const isFullReversal = priorSeatCount !== null && newQuantity <= priorSeatCount;
+
+        if (isFullReversal) {
+          // ================================================================
+          // GRACE PERIOD FULL REVERSAL — no billing action needed
+          // ================================================================
+
+          // Revert seat count to what it was before the addition
+          await tx.subscription.update({
+            where: { id: subscriptionDbId },
+            data: { seatCount: priorSeatCount },
+          });
+
+          // Create change record for the reversal
+          const change = await tx.subscriptionChange.create({
+            data: {
+              subscriptionId: subscriptionDbId,
+              changeType: "REMOVE_SEATS",
+              status: "APPLIED",
+              effectiveDate: changeDateObj,
+              previousSeatCount,
+              newSeatCount: priorSeatCount,
+              proRataAmount: 0,
+              billingCurrency: currency,
+              notes: `Grace period full reversal – seats returned to ${priorSeatCount} (within 7-day window). No billing impact. Event: ${notificationEvent}`,
+              createdById: session.user!.id!,
+            },
+          });
+
+          // Close the 7-day window
+          await tx.sevenDayWindow.update({
+            where: { id: openWindow.id },
+            data: { isClosed: true },
+          });
+
+          // Cancel all pending (non-completed) amendment queue items for this
+          // customer + product that were created by the original addition
+          const pendingAmendments = await tx.amendmentQueueItem.findMany({
+            where: {
+              customerId: subscription.customerId,
+              productName: subscription.product.name,
+              isCompleted: false,
+            },
+          });
+
+          for (const amendment of pendingAmendments) {
+            await tx.amendmentQueueItem.update({
+              where: { id: amendment.id },
+              data: {
+                isCompleted: true,
+                completedAt: new Date(),
+                reason: amendment.reason + " [AUTO-CANCELLED: Grace period reversal]",
+              },
+            });
+          }
+
+          // Create a single "no action" amendment so the admin knows what happened
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              description: [
+                `NO BILLING ACTION REQUIRED — Grace period reversal for ${subscription.customer.name}`,
+                ``,
+                `Product: ${subscription.product.name}`,
+                `What happened:`,
+                `  • Seat increase: ${priorSeatCount} → ${previousSeatCount} on ${originalChange ? format(originalChange.effectiveDate, "d MMMM yyyy") : "recently"}`,
+                `  • Seat decrease: ${previousSeatCount} → ${priorSeatCount} on ${dateStr} (within 7-day grace period)`,
+                ``,
+                `Result: Seats are back to ${priorSeatCount}. No pro-rata invoice or credit note needed.`,
+                `The previous amendment tasks for this change have been automatically cancelled.`,
+                ``,
+                `No changes needed to the repeating invoice in Xero.`,
+              ].join("\n"),
+              productName: subscription.product.name,
+              newMonthlyAmount: pricePerSeat * priorSeatCount,
+              newSeatCount: priorSeatCount,
+              actionByDate: changeDateObj,
+              reason: `Grace period reversal: ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount} – ${subscription.customer.name}`,
+            },
+          });
+
+          await tx.auditLog.create({
+            data: {
+              userId: session.user!.id!,
+              action: "CLOUD_IQ_APPLY_GRACE_PERIOD_REVERSAL",
+              entityType: "Subscription",
+              entityId: subscriptionDbId,
+              details: `Cloud-iQ: Grace period full reversal – ${subscription.product.name} seats ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount}. No billing impact. Event: ${notificationEvent}`,
+              proRataAmount: 0,
+              sevenDayWindowOpen: false,
+              xeroInstructionsGen: true,
+            },
+          });
+
+          return {
+            changeType: "REMOVE_SEATS" as const,
+            withinWindow: true,
+            isGracePeriodReversal: true,
+            customerName: subscription.customer.name,
+            productName: subscription.product.name,
+            previousSeatCount,
+            newSeatCount: priorSeatCount,
+            creditAmount: 0,
+            currency,
+            tasks: [{
+              description: `NO BILLING ACTION REQUIRED — Grace period reversal. Seats returned to ${priorSeatCount}. Previous amendment tasks have been automatically cancelled.`,
+              actionByDate: changeDateObj.toISOString(),
+              reason: `Grace period reversal: ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount}`,
+            }],
+            message: `Grace period reversal detected. The seat addition has been fully reversed within the 7-day window. No billing changes are needed — previous amendment tasks have been automatically cancelled.`,
+          };
+        }
+
+        // ================================================================
+        // PARTIAL SEAT DECREASE within 7-day window (not a full reversal)
+        // ================================================================
         await tx.subscription.update({
           where: { id: subscriptionDbId },
           data: { seatCount: newQuantity },

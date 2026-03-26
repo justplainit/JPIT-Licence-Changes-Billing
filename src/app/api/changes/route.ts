@@ -259,7 +259,103 @@ export async function POST(request: NextRequest) {
             : null;
 
           if (openWindow) {
-            // Within 7-day window: immediate reduction with credit
+            // Check if this is a full reversal (grace period cancellation)
+            const originalChange = openWindow.changeId
+              ? await tx.subscriptionChange.findUnique({ where: { id: openWindow.changeId } })
+              : null;
+            const priorSeatCount = originalChange?.previousSeatCount ?? null;
+            const isFullReversal = priorSeatCount !== null && newSeatCount <= priorSeatCount;
+
+            if (isFullReversal) {
+              // GRACE PERIOD FULL REVERSAL — no billing impact
+              const restoredSeatCount = priorSeatCount;
+
+              await tx.subscription.update({
+                where: { id: subscriptionId },
+                data: { seatCount: restoredSeatCount },
+              });
+
+              const change = await tx.subscriptionChange.create({
+                data: {
+                  subscriptionId,
+                  changeType: "REMOVE_SEATS",
+                  status: "APPLIED",
+                  effectiveDate: changeDateObj,
+                  previousSeatCount,
+                  newSeatCount: restoredSeatCount,
+                  proRataAmount: 0,
+                  billingCurrency: currency,
+                  notes: notes || `Grace period full reversal – seats returned to ${restoredSeatCount}. No billing impact.`,
+                  createdById: session.user!.id!,
+                },
+              });
+
+              // Close the 7-day window
+              await tx.sevenDayWindow.update({
+                where: { id: openWindow.id },
+                data: { isClosed: true },
+              });
+
+              // Cancel pending amendment queue items for this customer + product
+              const pendingAmendments = await tx.amendmentQueueItem.findMany({
+                where: {
+                  customerId: subscription.customerId,
+                  productName: subscription.product.name,
+                  isCompleted: false,
+                },
+              });
+
+              for (const amendment of pendingAmendments) {
+                await tx.amendmentQueueItem.update({
+                  where: { id: amendment.id },
+                  data: {
+                    isCompleted: true,
+                    completedAt: new Date(),
+                    reason: amendment.reason + " [AUTO-CANCELLED: Grace period reversal]",
+                  },
+                });
+              }
+
+              await tx.amendmentQueueItem.create({
+                data: {
+                  customerId: subscription.customerId,
+                  description: [
+                    `NO BILLING ACTION REQUIRED — Grace period reversal for ${subscription.customer.name}`,
+                    ``,
+                    `Product: ${subscription.product.name}`,
+                    `Seats returned to ${restoredSeatCount} within 7-day grace period.`,
+                    `No pro-rata invoice or credit note needed.`,
+                    `No changes needed to the repeating invoice in Xero.`,
+                  ].join("\n"),
+                  productName: subscription.product.name,
+                  newMonthlyAmount: pricePerSeat * restoredSeatCount,
+                  newSeatCount: restoredSeatCount,
+                  actionByDate: changeDateObj,
+                  reason: `Grace period reversal: ${restoredSeatCount} → ${previousSeatCount} → ${restoredSeatCount} – ${subscription.customer.name}`,
+                },
+              });
+
+              await tx.auditLog.create({
+                data: {
+                  userId: session.user!.id!,
+                  action: "GRACE_PERIOD_REVERSAL",
+                  entityType: "Subscription",
+                  entityId: subscriptionId,
+                  details: `Grace period full reversal – ${subscription.product.name} seats ${restoredSeatCount} → ${previousSeatCount} → ${restoredSeatCount}. No billing impact.`,
+                  proRataAmount: 0,
+                  sevenDayWindowOpen: false,
+                },
+              });
+
+              return {
+                change,
+                isGracePeriodReversal: true,
+                withinWindow: true,
+                message: `Grace period reversal detected. Seats returned to ${restoredSeatCount}. No billing changes needed — previous amendment tasks cancelled.`,
+              };
+            }
+
+            // Within 7-day window (partial decrease): immediate reduction with credit
             await tx.subscription.update({
               where: { id: subscriptionId },
               data: { seatCount: newSeatCount },

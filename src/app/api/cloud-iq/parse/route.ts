@@ -29,6 +29,33 @@ function parseStateChangeEvent(event: string): {
   return { isStateChange: true, fromState, toState, isCancellation, isSuspension, isReactivation };
 }
 
+// Detect "Quantity changed from X to Y" in event text
+function parseQuantityChangeEvent(event: string): {
+  isQuantityChange: boolean;
+  fromQuantity: number;
+  toQuantity: number;
+} {
+  const match = event.match(/quantity\s+changed\s+from\s+(\d+)\s+to\s+(\d+)/i);
+  if (!match) {
+    return { isQuantityChange: false, fromQuantity: 0, toQuantity: 0 };
+  }
+  return {
+    isQuantityChange: true,
+    fromQuantity: parseInt(match[1], 10),
+    toQuantity: parseInt(match[2], 10),
+  };
+}
+
+// Check if a date falls within the 7-day grace period after renewal
+function isWithinRenewalGracePeriod(notificationTime: Date, renewalDate: Date): boolean {
+  // The grace period is 7 days (168 hours) from the renewal date
+  // The notification must be AFTER the renewal date and within 7 days
+  const renewalStart = new Date(renewalDate);
+  const gracePeriodEnd = new Date(renewalDate);
+  gracePeriodEnd.setDate(gracePeriodEnd.getDate() + 7);
+  return notificationTime >= renewalStart && notificationTime <= gracePeriodEnd;
+}
+
 export interface ParsedNotificationResult {
   notification: {
     time: string;
@@ -50,7 +77,8 @@ export interface ParsedNotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
+    previousQuantity: number | null;
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "grace_period_reduction";
     details: string;
   };
 }
@@ -144,6 +172,7 @@ export async function POST(request: NextRequest) {
               productName: subscription.product.name,
               currentSeatCount: subscription.seatCount,
               seatDifference: null,
+              previousQuantity: null,
               status: "cancellation",
               details: `Subscription EXPIRED/CANCELLED: ${subscription.product.name} (${subscription.seatCount} seats). Event: ${notification.event}. This subscription must be removed from billing.`,
             },
@@ -162,6 +191,7 @@ export async function POST(request: NextRequest) {
               productName: subscription.product.name,
               currentSeatCount: subscription.seatCount,
               seatDifference: null,
+              previousQuantity: null,
               status: "suspension",
               details: `Subscription SUSPENDED: ${subscription.product.name} (${subscription.seatCount} seats). Event: ${notification.event}. Review billing — subscription may need to be paused.`,
             },
@@ -171,15 +201,34 @@ export async function POST(request: NextRequest) {
 
         // Normal seat comparison
         const seatDifference = notification.quantity - subscription.seatCount;
-        const status = seatDifference === 0 ? "no_change" : "matched";
+        let status: ParsedNotificationResult["match"]["status"] = seatDifference === 0 ? "no_change" : "matched";
         let details = "";
+        let previousQuantity: number | null = null;
 
         if (seatDifference > 0) {
           details = `Seat increase detected: ${subscription.seatCount} → ${notification.quantity} (+${seatDifference} seats)`;
         } else if (seatDifference < 0) {
           details = `Seat decrease detected: ${subscription.seatCount} → ${notification.quantity} (${seatDifference} seats)`;
         } else {
-          details = `No seat change. Current: ${subscription.seatCount}, Cloud-iQ: ${notification.quantity}. Event: ${notification.event}`;
+          // Seats match — but check for a grace period reduction.
+          // If the event says "Quantity changed from X to Y" AND the notification
+          // is within 7 days of the subscription's renewal date, this is a
+          // renewal grace period seat reduction that needs billing action.
+          const quantityChange = parseQuantityChangeEvent(notification.event);
+          const notificationDate = new Date(notification.time);
+
+          if (
+            quantityChange.isQuantityChange &&
+            quantityChange.fromQuantity > quantityChange.toQuantity &&
+            isWithinRenewalGracePeriod(notificationDate, subscription.renewalDate)
+          ) {
+            status = "grace_period_reduction";
+            previousQuantity = quantityChange.fromQuantity;
+            const seatsReduced = quantityChange.fromQuantity - quantityChange.toQuantity;
+            details = `Grace period seat reduction detected: ${quantityChange.fromQuantity} → ${quantityChange.toQuantity} (−${seatsReduced} seat${seatsReduced !== 1 ? "s" : ""}). Within 7-day renewal grace period. Pro-rata billing required for the days between renewal and this change.`;
+          } else {
+            details = `No seat change. Current: ${subscription.seatCount}, Cloud-iQ: ${notification.quantity}. Event: ${notification.event}`;
+          }
         }
 
         results.push({
@@ -192,6 +241,7 @@ export async function POST(request: NextRequest) {
             productName: subscription.product.name,
             currentSeatCount: subscription.seatCount,
             seatDifference,
+            previousQuantity,
             status,
             details,
           },
@@ -226,6 +276,7 @@ export async function POST(request: NextRequest) {
             productName: product?.name ?? null,
             currentSeatCount: null,
             seatDifference: null,
+            previousQuantity: null,
             status: isNewSub ? "new_subscription" : hasAnyMatch ? "partial" : "new",
             details: isNewSub
               ? `New subscription detected: ${customer!.name} – ${product!.name}. Ready to create subscription and set up billing.`
@@ -244,7 +295,7 @@ export async function POST(request: NextRequest) {
         action: "CLOUD_IQ_PARSE",
         entityType: "CloudIQNotification",
         entityId: "batch",
-        details: `Parsed ${notifications.length} Cloud-iQ notification(s). Matched: ${results.filter((r) => r.match.status === "matched").length}, No change: ${results.filter((r) => r.match.status === "no_change").length}, Partial: ${results.filter((r) => r.match.status === "partial").length}, New: ${results.filter((r) => r.match.status === "new").length}`,
+        details: `Parsed ${notifications.length} Cloud-iQ notification(s). Matched: ${results.filter((r) => r.match.status === "matched").length}, Grace period: ${results.filter((r) => r.match.status === "grace_period_reduction").length}, No change: ${results.filter((r) => r.match.status === "no_change").length}, Partial: ${results.filter((r) => r.match.status === "partial").length}, New: ${results.filter((r) => r.match.status === "new").length}`,
       },
     });
 

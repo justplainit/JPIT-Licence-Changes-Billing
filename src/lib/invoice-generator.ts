@@ -2,6 +2,7 @@ import { format, endOfMonth, startOfDay } from "date-fns";
 import {
   calculateProRata,
   calculateSeatReductionCredit,
+  calculateGracePeriodProRata,
   calculateUpgradeCost,
   formatCurrency,
 } from "./billing-calculations";
@@ -219,6 +220,99 @@ export function generateCreditNoteDraft(params: {
     invoiceDate: reductionDate,
     lineItems: [lineItem],
     totalAmount: -creditResult.totalCredit,
+    currency,
+    notes,
+    formattedDraft,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Grace period pro-rata invoice draft (renewal date → reduction date)
+// ---------------------------------------------------------------------------
+
+export function generateGracePeriodInvoiceDraft(params: {
+  customerName: string;
+  productName: string;
+  pricePerSeat: number;
+  seatsReduced: number;
+  renewalDate: Date;
+  reductionDate: Date;
+  newSeatCount: number;
+  currency?: string;
+}): InvoiceDraftOutput {
+  const {
+    customerName,
+    productName,
+    pricePerSeat,
+    seatsReduced,
+    renewalDate,
+    reductionDate,
+    newSeatCount,
+    currency = "ZAR",
+  } = params;
+
+  const gracePeriod = calculateGracePeriodProRata({
+    pricePerSeat,
+    seatsReduced,
+    renewalDate,
+    reductionDate,
+    currency,
+  });
+
+  const lineItem: InvoiceLineItemOutput = {
+    description: `${productName} \u2013 Pro rata for ${seatsReduced} seat${seatsReduced !== 1 ? "s" : ""} used during grace period (${format(gracePeriod.periodStart, "d MMM")} \u2013 ${format(gracePeriod.periodEnd, "d MMM yyyy")})`,
+    quantity: seatsReduced,
+    unitPrice: gracePeriod.perSeatCharge,
+    lineTotal: gracePeriod.totalCharge,
+    calculationBreakdown: gracePeriod.breakdown,
+  };
+
+  const notes = [
+    `This invoice covers the pro-rata charge for ${seatsReduced} seat${seatsReduced !== 1 ? "s" : ""} that were active during the 7-day renewal grace period.`,
+    `The customer reduced from ${newSeatCount + seatsReduced} to ${newSeatCount} seats within the grace period.`,
+    `Update the repeating invoice to ${newSeatCount} seats at ${formatCurrency(pricePerSeat, currency)}/seat immediately.`,
+  ];
+
+  const formattedDraft = [
+    `${"=".repeat(60)}`,
+    `GRACE PERIOD PRO RATA INVOICE DRAFT`,
+    `${"=".repeat(60)}`,
+    ``,
+    `Customer:       ${customerName}`,
+    `Invoice date:   ${formatDate(reductionDate)}`,
+    `Currency:       ${currency}`,
+    ``,
+    `${"─".repeat(60)}`,
+    `LINE ITEMS`,
+    `${"─".repeat(60)}`,
+    ``,
+    `${lineItem.description}`,
+    `  Qty: ${seatsReduced}   Unit price: ${formatCurrency(lineItem.unitPrice, currency)}   Line total: ${formatCurrency(lineItem.lineTotal, currency)}`,
+    ``,
+    `  Calculation:`,
+    ...gracePeriod.breakdown.split("\n").map((line: string) => `    ${line}`),
+    ``,
+    `${"─".repeat(60)}`,
+    `TOTAL: ${formatCurrency(gracePeriod.totalCharge, currency)}`,
+    `${"─".repeat(60)}`,
+    ``,
+    `NOTES:`,
+    ...notes.map((note: string, i: number) => `  ${i + 1}. ${note}`),
+    ``,
+    `Seat summary:`,
+    `  Previous count (at renewal):  ${newSeatCount + seatsReduced}`,
+    `  Reduced by:                   ${seatsReduced}`,
+    `  New count:                    ${newSeatCount}`,
+    `  Grace period:                 ${formatShortDate(renewalDate)} – ${formatShortDate(reductionDate)}`,
+    `${"=".repeat(60)}`,
+  ].join("\n");
+
+  return {
+    type: "PRO_RATA",
+    customerName,
+    invoiceDate: reductionDate,
+    lineItems: [lineItem],
+    totalAmount: gracePeriod.totalCharge,
     currency,
     notes,
     formattedDraft,

@@ -25,7 +25,8 @@ interface NotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
+    previousQuantity: number | null;
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "grace_period_reduction";
     details: string;
   };
 }
@@ -41,6 +42,8 @@ interface ApplyResult {
   proRataAmount?: number;
   creditAmount?: number;
   isGracePeriodReversal?: boolean;
+  isGracePeriodReduction?: boolean;
+  gracePeriodDays?: number;
   currency?: string;
   withinWindow?: boolean;
   scheduledFor?: string;
@@ -92,11 +95,18 @@ export default function CloudIQPage() {
       const matched = data.results.filter(
         (r: NotificationResult) => r.match.status === "matched"
       ).length;
+      const gracePeriod = data.results.filter(
+        (r: NotificationResult) => r.match.status === "grace_period_reduction"
+      ).length;
       const noChange = data.results.filter(
         (r: NotificationResult) => r.match.status === "no_change"
       ).length;
 
-      if (matched > 0) {
+      if (gracePeriod > 0) {
+        toast.success(
+          `Found ${gracePeriod} grace period reduction(s) requiring pro-rata billing.`
+        );
+      } else if (matched > 0) {
         toast.success(
           `Found ${matched} subscription(s) with seat changes.`
         );
@@ -118,11 +128,12 @@ export default function CloudIQPage() {
     const isCancellation = result.match.status === "cancellation";
     const isSuspension = result.match.status === "suspension";
     const isNewSubscription = result.match.status === "new_subscription";
+    const isGracePeriodReduction = result.match.status === "grace_period_reduction";
     const isSeatChange = result.match.status === "matched" &&
       result.match.seatDifference !== null &&
       result.match.seatDifference !== 0;
 
-    if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription) return;
+    if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription && !isGracePeriodReduction) return;
     if (!isNewSubscription && !result.match.subscriptionDbId) return;
 
     setApplyingIndex(index);
@@ -133,10 +144,11 @@ export default function CloudIQPage() {
         body: JSON.stringify({
           subscriptionDbId: result.match.subscriptionDbId || "",
           newQuantity: result.notification.quantity || 1,
+          ...(isGracePeriodReduction && { previousQuantity: result.match.previousQuantity }),
           notificationTime: result.notification.time,
           notificationEvent: result.notification.event,
           notificationSubscriptionId: result.notification.subscriptionId,
-          applyType: isNewSubscription ? "new_subscription" : isCancellation ? "cancellation" : isSuspension ? "suspension" : "seat_change",
+          applyType: isGracePeriodReduction ? "grace_period_reduction" : isNewSubscription ? "new_subscription" : isCancellation ? "cancellation" : isSuspension ? "suspension" : "seat_change",
           ...(isNewSubscription && {
             customerId: result.match.customerId,
             productId: result.match.productId,
@@ -178,6 +190,7 @@ export default function CloudIQPage() {
     suspension: "bg-orange-50 border-orange-200",
     reactivation: "bg-green-50 border-green-200",
     new_subscription: "bg-emerald-50 border-emerald-200",
+    grace_period_reduction: "bg-purple-50 border-purple-200",
   };
 
   const statusLabels: Record<string, string> = {
@@ -189,6 +202,7 @@ export default function CloudIQPage() {
     suspension: "Suspended",
     reactivation: "Reactivated",
     new_subscription: "New Subscription",
+    grace_period_reduction: "Grace Period Reduction",
   };
 
   const statusBadgeColors: Record<string, string> = {
@@ -200,6 +214,7 @@ export default function CloudIQPage() {
     suspension: "bg-orange-100 text-orange-800",
     reactivation: "bg-green-100 text-green-800",
     new_subscription: "bg-emerald-100 text-emerald-800",
+    grace_period_reduction: "bg-purple-100 text-purple-800",
   };
 
   return (
@@ -254,6 +269,10 @@ export default function CloudIQPage() {
               <span className="rounded-full bg-blue-100 px-2 py-1 text-blue-800">
                 {results.filter((r) => r.match.status === "matched").length}{" "}
                 Changes
+              </span>
+              <span className="rounded-full bg-purple-100 px-2 py-1 text-purple-800">
+                {results.filter((r) => r.match.status === "grace_period_reduction").length}{" "}
+                Grace Period
               </span>
               <span className="rounded-full bg-gray-100 px-2 py-1 text-gray-800">
                 {results.filter((r) => r.match.status === "no_change").length}{" "}
@@ -371,6 +390,42 @@ export default function CloudIQPage() {
                         Seats: {result.match.currentSeatCount} (matches
                         Cloud-iQ)
                       </p>
+                    )}
+
+                  {/* Grace period reduction display */}
+                  {result.match.status === "grace_period_reduction" &&
+                    result.match.previousQuantity !== null && (
+                      <div className="rounded-md bg-white/70 p-3 text-sm">
+                        <div className="grid grid-cols-3 gap-4 text-center">
+                          <div>
+                            <p className="text-xs text-slate-500">
+                              Before (at renewal)
+                            </p>
+                            <p className="text-lg font-bold text-slate-900">
+                              {result.match.previousQuantity}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-slate-500">
+                              After (grace period)
+                            </p>
+                            <p className="text-lg font-bold text-slate-900">
+                              {result.notification.quantity}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-slate-500">
+                              Reduced by
+                            </p>
+                            <p className="text-lg font-bold text-red-600">
+                              -{result.match.previousQuantity - result.notification.quantity}
+                            </p>
+                          </div>
+                        </div>
+                        <p className="mt-2 text-xs text-purple-700 font-medium">
+                          Within 7-day renewal grace period — pro-rata billing required
+                        </p>
+                      </div>
                     )}
 
                   {/* Cancellation/Expiry display */}
@@ -491,6 +546,22 @@ export default function CloudIQPage() {
                       </Button>
                     </div>
                   )}
+
+                {/* Action button for grace period reduction */}
+                {result.match.status === "grace_period_reduction" &&
+                  !appliedResults[index] && (
+                    <div className="ml-4">
+                      <Button
+                        onClick={() => handleApply(index, result)}
+                        disabled={applyingIndex === index}
+                        className="bg-purple-600 hover:bg-purple-700 text-white"
+                      >
+                        {applyingIndex === index
+                          ? "Applying..."
+                          : "Apply Grace Period Reduction"}
+                      </Button>
+                    </div>
+                  )}
               </div>
 
               {/* Applied result: Tasks for accounting */}
@@ -501,6 +572,8 @@ export default function CloudIQPage() {
                     <span className="text-sm font-semibold text-green-800">
                       {appliedResults[index].isGracePeriodReversal
                         ? "Grace period reversal — no billing changes needed"
+                        : appliedResults[index].isGracePeriodReduction
+                          ? "Grace period reduction applied — pro-rata billing and repeating invoice update required"
                         : appliedResults[index].changeType === "NEW_SUBSCRIPTION"
                           ? "Subscription created and billing tasks generated"
                           : appliedResults[index].changeType === "CANCELLATION"

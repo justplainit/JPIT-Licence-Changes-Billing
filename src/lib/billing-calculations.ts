@@ -172,6 +172,70 @@ export function calculateSeatReductionCredit(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Grace period pro-rata: charge for seats used between renewal and reduction
+// ---------------------------------------------------------------------------
+// When a customer reduces seats within the 7-day grace period after renewal,
+// the reduction takes effect immediately. But they used the extra seats from
+// the renewal date until the reduction date, so they must be billed pro-rata
+// for that period.
+
+export interface GracePeriodProRataResult {
+  dailyRate: number;
+  daysUsed: number;
+  daysInMonth: number;
+  perSeatCharge: number;
+  totalCharge: number;
+  periodStart: Date;
+  periodEnd: Date;
+  breakdown: string;
+}
+
+export function calculateGracePeriodProRata(params: {
+  pricePerSeat: number;
+  seatsReduced: number;
+  renewalDate: Date;
+  reductionDate: Date;
+  currency?: string;
+}): GracePeriodProRataResult {
+  const { pricePerSeat, seatsReduced, renewalDate, reductionDate, currency = "ZAR" } = params;
+
+  const daysInMonth = getDaysInMonth(renewalDate);
+  const periodStart = startOfDay(renewalDate);
+  const periodEnd = startOfDay(reductionDate);
+
+  // Days used = renewal date through the day before the reduction (inclusive)
+  // e.g. renewal 1 April, reduction 7 April = 6 days (1,2,3,4,5,6 April)
+  const daysUsed = differenceInCalendarDays(periodEnd, periodStart);
+
+  const dailyRate = roundTo2(pricePerSeat / daysInMonth);
+  const perSeatCharge = roundTo2(dailyRate * daysUsed);
+  const totalCharge = roundTo2(perSeatCharge * seatsReduced);
+
+  const sym = currencySymbol(currency);
+  const startStr = format(periodStart, "d MMM");
+  const endStr = format(periodEnd, "d MMM");
+
+  const breakdown = [
+    `Customer's agreed rate per seat: ${sym}${pricePerSeat.toFixed(2)}/month`,
+    `Daily rate: ${sym}${pricePerSeat.toFixed(2)} \u00F7 ${daysInMonth} = ${sym}${dailyRate.toFixed(2)}`,
+    `Days used (renewal to reduction): ${daysUsed} (${startStr} \u2013 ${endStr})`,
+    `Per seat charge: ${sym}${dailyRate.toFixed(2)} \u00D7 ${daysUsed} = ${sym}${perSeatCharge.toFixed(2)}`,
+    `Total charge: ${sym}${perSeatCharge.toFixed(2)} \u00D7 ${seatsReduced} = ${sym}${totalCharge.toFixed(2)}`,
+  ].join("\n");
+
+  return {
+    dailyRate,
+    daysUsed,
+    daysInMonth,
+    perSeatCharge,
+    totalCharge,
+    periodStart,
+    periodEnd,
+    breakdown,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Upgrade cost calculation (credit old + charge new)
 // ---------------------------------------------------------------------------
 

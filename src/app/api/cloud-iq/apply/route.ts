@@ -5,21 +5,24 @@ import { format } from "date-fns";
 import {
   calculateProRata,
   calculateSeatReductionCredit,
+  calculateGracePeriodProRata,
   calculate7DayWindow,
   formatCurrency,
 } from "@/lib/billing-calculations";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
+  generateGracePeriodInvoiceDraft,
 } from "@/lib/invoice-generator";
 
 interface ApplyRequest {
   subscriptionDbId: string;
   newQuantity: number;
+  previousQuantity?: number;
   notificationTime: string;
   notificationEvent: string;
   notificationSubscriptionId: string;
-  applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
+  applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription" | "grace_period_reduction";
   customerId?: string;
   productId?: string;
 }
@@ -32,7 +35,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
+    const { subscriptionDbId, newQuantity, previousQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
 
     if (!subscriptionDbId) {
       return NextResponse.json(
@@ -437,6 +440,265 @@ export async function POST(request: NextRequest) {
             actionByDate: a.actionByDate.toISOString(),
             reason: a.reason,
           })),
+        };
+      });
+
+      return NextResponse.json(result, { status: 201 });
+    }
+
+    // ================================================================
+    // GRACE PERIOD REDUCTION
+    // ================================================================
+    if (applyType === "grace_period_reduction") {
+      if (!previousQuantity || !newQuantity) {
+        return NextResponse.json(
+          { error: "previousQuantity and newQuantity are required for grace period reductions" },
+          { status: 400 }
+        );
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const subscription = await tx.subscription.findUnique({
+          where: { id: subscriptionDbId },
+          include: {
+            customer: true,
+            product: true,
+            scheduledChanges: {
+              where: { status: "PENDING" },
+            },
+          },
+        });
+
+        if (!subscription) {
+          throw new Error("Subscription not found");
+        }
+
+        const seatsReduced = previousQuantity - newQuantity;
+
+        // Update the Microsoft Subscription ID if we have one and it's not set yet
+        if (notificationSubscriptionId && !subscription.microsoftSubId) {
+          await tx.subscription.update({
+            where: { id: subscriptionDbId },
+            data: { microsoftSubId: notificationSubscriptionId },
+          });
+        }
+
+        // Get customer price
+        const customerPrice = await tx.customerPrice.findFirst({
+          where: {
+            customerId: subscription.customerId,
+            productId: subscription.productId,
+            effectiveTo: null,
+          },
+          orderBy: { effectiveFrom: "desc" },
+        });
+
+        const pricePerSeat = customerPrice?.pricePerSeat ?? 0;
+        const currency = customerPrice?.currency ?? subscription.customer.currency ?? "ZAR";
+        const dateStr = format(changeDateObj, "d MMMM yyyy");
+        const renewalDateStr = format(subscription.renewalDate, "d MMMM yyyy");
+        const nextMonthDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+        const nextMonthName = format(nextMonthDate, "MMMM yyyy");
+
+        // Calculate pro-rata for the grace period (renewal date → reduction date)
+        const gracePeriod = calculateGracePeriodProRata({
+          pricePerSeat,
+          seatsReduced,
+          renewalDate: subscription.renewalDate,
+          reductionDate: changeDateObj,
+          currency,
+        });
+
+        // Update seat count to the new quantity
+        await tx.subscription.update({
+          where: { id: subscriptionDbId },
+          data: { seatCount: newQuantity },
+        });
+
+        // Cancel any pending scheduled changes for this subscription
+        // (they are no longer needed since the grace period reduction takes effect immediately)
+        const cancelledScheduledChanges = await tx.scheduledChange.updateMany({
+          where: { subscriptionId: subscriptionDbId, status: "PENDING" },
+          data: { status: "CANCELLED" },
+        });
+
+        // Cancel any pending amendment queue items related to scheduled reductions
+        const pendingAmendments = await tx.amendmentQueueItem.findMany({
+          where: {
+            customerId: subscription.customerId,
+            productName: subscription.product.name,
+            isCompleted: false,
+          },
+        });
+
+        for (const amendment of pendingAmendments) {
+          if (amendment.reason?.includes("Scheduled seat decrease") || amendment.reason?.includes("scheduled for renewal")) {
+            await tx.amendmentQueueItem.update({
+              where: { id: amendment.id },
+              data: {
+                isCompleted: true,
+                completedAt: new Date(),
+                reason: amendment.reason + " [AUTO-CANCELLED: Grace period reduction applied]",
+              },
+            });
+          }
+        }
+
+        // Create change record
+        const change = await tx.subscriptionChange.create({
+          data: {
+            subscriptionId: subscriptionDbId,
+            changeType: "REMOVE_SEATS",
+            status: "APPLIED",
+            effectiveDate: changeDateObj,
+            previousSeatCount: previousQuantity,
+            newSeatCount: newQuantity,
+            proRataAmount: gracePeriod.totalCharge,
+            proRataDays: gracePeriod.daysUsed,
+            proRataDailyRate: gracePeriod.dailyRate,
+            billingCurrency: currency,
+            notes: `Grace period reduction: ${previousQuantity} → ${newQuantity} (within 7-day renewal grace period). Pro-rata charge for ${gracePeriod.daysUsed} days. Event: ${notificationEvent}`,
+            createdById: session.user!.id!,
+          },
+        });
+
+        // Generate invoice draft
+        const invoiceDraftOutput = generateGracePeriodInvoiceDraft({
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          pricePerSeat,
+          seatsReduced,
+          renewalDate: subscription.renewalDate,
+          reductionDate: changeDateObj,
+          newSeatCount: newQuantity,
+          currency,
+        });
+
+        await tx.invoiceDraft.create({
+          data: {
+            customerId: subscription.customerId,
+            changeId: change.id,
+            draftType: "PRO_RATA",
+            invoiceDate: changeDateObj,
+            totalAmount: invoiceDraftOutput.totalAmount,
+            currency,
+            notes: invoiceDraftOutput.notes.join("\n"),
+            lineItems: {
+              create: invoiceDraftOutput.lineItems.map((item, index) => ({
+                description: item.description,
+                quantity: item.quantity,
+                unitPrice: item.unitPrice,
+                lineTotal: item.lineTotal,
+                calculationBreakdown: item.calculationBreakdown,
+                sortOrder: index,
+              })),
+            },
+          },
+        });
+
+        const amendmentItems: Array<{
+          description: string;
+          productName: string;
+          newMonthlyAmount: number;
+          newSeatCount: number;
+          actionByDate: Date;
+          reason: string;
+        }> = [];
+
+        // Task 1: Send pro-rata invoice for the grace period days
+        amendmentItems.push({
+          description: [
+            `SEND PRO-RATA INVOICE (GRACE PERIOD) to ${subscription.customer.name}`,
+            ``,
+            `Amount: ${formatCurrency(gracePeriod.totalCharge, currency)} (incl. VAT to be added)`,
+            `Product: ${subscription.product.name}`,
+            `Reason: ${seatsReduced} seat${seatsReduced !== 1 ? "s" : ""} reduced during 7-day renewal grace period`,
+            `Period: ${format(gracePeriod.periodStart, "d MMM")} – ${format(gracePeriod.periodEnd, "d MMM yyyy")} (${gracePeriod.daysUsed} days)`,
+            ``,
+            `Calculation:`,
+            `  Rate per seat: ${formatCurrency(pricePerSeat, currency)}/month`,
+            `  Daily rate: ${formatCurrency(gracePeriod.dailyRate, currency)} (${formatCurrency(pricePerSeat, currency)} ÷ ${gracePeriod.daysInMonth} days)`,
+            `  Days used: ${gracePeriod.daysUsed} (${renewalDateStr} to ${dateStr})`,
+            `  Per seat: ${formatCurrency(gracePeriod.perSeatCharge, currency)}`,
+            `  Total: ${formatCurrency(gracePeriod.perSeatCharge, currency)} × ${seatsReduced} = ${formatCurrency(gracePeriod.totalCharge, currency)}`,
+            ``,
+            `The customer had ${previousQuantity} seats from renewal (${renewalDateStr}) but reduced to ${newQuantity} within the grace period.`,
+            `Bill pro-rata for the ${seatsReduced} extra seat${seatsReduced !== 1 ? "s" : ""} for the ${gracePeriod.daysUsed} days they were active.`,
+            `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: gracePeriod.totalCharge,
+          newSeatCount: seatsReduced,
+          actionByDate: changeDateObj,
+          reason: `Grace period pro-rata invoice for ${seatsReduced} seat${seatsReduced !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+        });
+
+        // Task 2: Update repeating invoice immediately
+        const newMonthlyTotal = pricePerSeat * newQuantity;
+        amendmentItems.push({
+          description: [
+            `UPDATE REPEATING INVOICE IMMEDIATELY for ${subscription.customer.name} in Xero`,
+            ``,
+            `Product: ${subscription.product.name}`,
+            `Change: ${previousQuantity} seats → ${newQuantity} seats`,
+            `New monthly amount: ${formatCurrency(newMonthlyTotal, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+            `Effective: IMMEDIATELY (grace period reduction)`,
+            ``,
+            `This reduction happened within the 7-day renewal grace period, so it takes effect immediately.`,
+            `Update the repeating invoice NOW to reflect ${newQuantity} seats from 1 ${nextMonthName}.`,
+            ...(cancelledScheduledChanges.count > 0
+              ? [``, `Note: ${cancelledScheduledChanges.count} previously scheduled change(s) have been automatically cancelled.`]
+              : []),
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: newMonthlyTotal,
+          newSeatCount: newQuantity,
+          actionByDate: changeDateObj,
+          reason: `Grace period reduction: ${previousQuantity} → ${newQuantity} – update repeating invoice – ${subscription.customer.name}`,
+        });
+
+        // Create amendment queue items
+        for (const item of amendmentItems) {
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              ...item,
+            },
+          });
+        }
+
+        // Audit log
+        await tx.auditLog.create({
+          data: {
+            userId: session.user!.id!,
+            action: "CLOUD_IQ_APPLY_GRACE_PERIOD_REDUCTION",
+            entityType: "Subscription",
+            entityId: subscriptionDbId,
+            details: `Cloud-iQ: Grace period reduction – ${subscription.product.name} seats ${previousQuantity} → ${newQuantity}. Pro-rata charge: ${formatCurrency(gracePeriod.totalCharge, currency)} for ${gracePeriod.daysUsed} days. Event: ${notificationEvent}`,
+            proRataAmount: gracePeriod.totalCharge,
+            sevenDayWindowOpen: false,
+            xeroInstructionsGen: true,
+          },
+        });
+
+        return {
+          changeType: "REMOVE_SEATS" as const,
+          isGracePeriodReduction: true,
+          withinWindow: true,
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          previousSeatCount: previousQuantity,
+          newSeatCount: newQuantity,
+          proRataAmount: gracePeriod.totalCharge,
+          gracePeriodDays: gracePeriod.daysUsed,
+          currency,
+          tasks: amendmentItems.map((a) => ({
+            description: a.description,
+            actionByDate: a.actionByDate.toISOString(),
+            reason: a.reason,
+          })),
+          invoiceDraft: invoiceDraftOutput.formattedDraft,
+          message: `Grace period reduction applied. ${seatsReduced} seat${seatsReduced !== 1 ? "s" : ""} reduced within 7-day renewal grace period. Pro-rata charge of ${formatCurrency(gracePeriod.totalCharge, currency)} for ${gracePeriod.daysUsed} days (${renewalDateStr} to ${dateStr}).`,
         };
       });
 

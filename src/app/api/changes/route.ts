@@ -7,12 +7,14 @@ import {
   calculateSeatReductionCredit,
   calculateUpgradeCost,
   calculate7DayWindow,
+  formatCurrency,
 } from "@/lib/billing-calculations";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
   generateUpgradeInvoiceDraft,
 } from "@/lib/invoice-generator";
+import { format } from "date-fns";
 
 export async function GET(request: NextRequest) {
   try {
@@ -204,20 +206,73 @@ export async function POST(request: NextRequest) {
             },
           });
 
-          // Create amendment queue item for next billing cycle
+          // Amendment tasks
+          const dateStr = format(changeDateObj, "d MMMM yyyy");
+          const nextMonthDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+          const nextMonthName = format(nextMonthDate, "MMMM yyyy");
+          const xeroQty = (proRata.daysRemaining / proRata.daysInMonth).toFixed(5);
+          const xeroUnitPrice = pricePerSeat * additionalSeats;
+          const newMonthlyTotal = pricePerSeat * newSeatCount;
+
+          // Task 1: Send one-time pro-rata invoice
           await tx.amendmentQueueItem.create({
             data: {
               customerId: subscription.customerId,
-              description: `Update repeating invoice: ${subscription.product.name} from ${previousSeatCount} to ${newSeatCount} seats`,
+              description: [
+                `SEND ONE-TIME PRO-RATA INVOICE to ${subscription.customer.name}`,
+                ``,
+                `Amount: ${formatCurrency(proRata.totalAmount, currency)} (excl. VAT)`,
+                `Product: ${subscription.product.name}`,
+                `Reason: ${additionalSeats} additional seat${additionalSeats !== 1 ? "s" : ""} added on ${dateStr}`,
+                `Period: ${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")}`,
+                ``,
+                `Calculation:`,
+                `  Rate per seat: ${formatCurrency(pricePerSeat, currency)}/month`,
+                `  Daily rate: ${formatCurrency(proRata.dailyRate, currency)} (${formatCurrency(pricePerSeat, currency)} ÷ ${proRata.daysInMonth} days)`,
+                `  Days remaining: ${proRata.daysRemaining}`,
+                `  Per seat: ${formatCurrency(proRata.perSeatProRata, currency)}`,
+                `  Total: ${formatCurrency(proRata.perSeatProRata, currency)} × ${additionalSeats} = ${formatCurrency(proRata.totalAmount, currency)}`,
+                ``,
+                `Xero invoice entry:`,
+                `  Description: ${subscription.product.name} – Pro rata (${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")})`,
+                `  Quantity:    ${xeroQty}  (${proRata.daysRemaining} days ÷ ${proRata.daysInMonth} days in month)`,
+                `  Unit price:  ${formatCurrency(xeroUnitPrice, currency)}  (${additionalSeats} seat${additionalSeats !== 1 ? "s" : ""} × ${formatCurrency(pricePerSeat, currency)}/month)`,
+                `  Line total:  ${formatCurrency(proRata.totalAmount, currency)}`,
+                ``,
+                `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
+              ].join("\n"),
               productName: subscription.product.name,
-              newMonthlyAmount: pricePerSeat * newSeatCount,
-              newSeatCount,
-              actionByDate: new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1),
-              reason: `Mid-term seat addition: +${additionalSeats} seats effective ${changeDateObj.toISOString().split("T")[0]}`,
-              proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 100) / 100,
+              newMonthlyAmount: proRata.totalAmount,
+              newSeatCount: additionalSeats,
+              actionByDate: changeDateObj,
+              reason: `Pro-rata invoice for ${additionalSeats} new seat${additionalSeats !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+              proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 10000) / 10000,
               proRataDays: proRata.daysRemaining,
               proRataDaysInMonth: proRata.daysInMonth,
               proRataAmount: proRata.totalAmount,
+            },
+          });
+
+          // Task 2: Update repeating invoice from next month
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              description: [
+                `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
+                ``,
+                `Product: ${subscription.product.name}`,
+                `Change: ${previousSeatCount} seats → ${newSeatCount} seats`,
+                `New monthly amount: ${formatCurrency(newMonthlyTotal, currency)} (${newSeatCount} × ${formatCurrency(pricePerSeat, currency)})`,
+                `Effective from: 1 ${nextMonthName}`,
+                ``,
+                `DO NOT change the current month's repeating invoice – it has already been billed.`,
+                `Only update the repeating invoice so that from 1 ${nextMonthName} it reflects ${newSeatCount} seats.`,
+              ].join("\n"),
+              productName: subscription.product.name,
+              newMonthlyAmount: newMonthlyTotal,
+              newSeatCount,
+              actionByDate: nextMonthDate,
+              reason: `Seat increase: ${previousSeatCount} → ${newSeatCount} effective ${dateStr}`,
             },
           });
 

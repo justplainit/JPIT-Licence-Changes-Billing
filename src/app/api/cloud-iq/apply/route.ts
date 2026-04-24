@@ -366,11 +366,13 @@ export async function POST(request: NextRequest) {
         }
 
         // Task 1: Send pro-rata invoice for the current month
+        const xeroQtyNewSub = (proRata.daysRemaining / proRata.daysInMonth).toFixed(5);
+        const xeroUnitPriceNewSub = pricePerSeat * seatCount;
         amendmentItems.push({
           description: [
             `SEND ONE-TIME PRO-RATA INVOICE to ${customer.name}`,
             ``,
-            `Amount: ${formatCurrency(proRata.totalAmount, currency)} (incl. VAT to be added)`,
+            `Amount: ${formatCurrency(proRata.totalAmount, currency)} (excl. VAT)`,
             `Product: ${product.name}`,
             `Reason: New subscription – ${seatCount} seat${seatCount !== 1 ? "s" : ""} starting ${dateStr}`,
             `Period: ${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")}`,
@@ -381,6 +383,12 @@ export async function POST(request: NextRequest) {
             `  Days remaining: ${proRata.daysRemaining}`,
             `  Per seat: ${formatCurrency(proRata.perSeatProRata, currency)}`,
             `  Total: ${formatCurrency(proRata.perSeatProRata, currency)} × ${seatCount} = ${formatCurrency(proRata.totalAmount, currency)}`,
+            ``,
+            `Xero invoice entry:`,
+            `  Description: ${product.name} – Pro rata (${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")})`,
+            `  Quantity:    ${xeroQtyNewSub}  (${proRata.daysRemaining} days ÷ ${proRata.daysInMonth} days in month)`,
+            `  Unit price:  ${formatCurrency(xeroUnitPriceNewSub, currency)}  (${seatCount} seat${seatCount !== 1 ? "s" : ""} × ${formatCurrency(pricePerSeat, currency)}/month)`,
+            `  Line total:  ${formatCurrency(proRata.totalAmount, currency)}`,
             ``,
             `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
           ].join("\n"),
@@ -613,11 +621,13 @@ export async function POST(request: NextRequest) {
         // ---- AMENDMENT TASKS WITH EXACT INSTRUCTIONS ----
 
         // Task 1: Send pro-rata invoice NOW
+        const xeroQtyAddSeats = (proRata.daysRemaining / proRata.daysInMonth).toFixed(5);
+        const xeroUnitPriceAddSeats = pricePerSeat * additionalSeats;
         amendmentItems.push({
           description: [
             `SEND ONE-TIME PRO-RATA INVOICE to ${subscription.customer.name}`,
             ``,
-            `Amount: ${formatCurrency(proRata.totalAmount, currency)} (incl. VAT to be added)`,
+            `Amount: ${formatCurrency(proRata.totalAmount, currency)} (excl. VAT)`,
             `Product: ${subscription.product.name}`,
             `Reason: ${additionalSeats} additional seat${additionalSeats !== 1 ? "s" : ""} added on ${dateStr}`,
             `Period: ${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")}`,
@@ -628,6 +638,12 @@ export async function POST(request: NextRequest) {
             `  Days remaining: ${proRata.daysRemaining}`,
             `  Per seat: ${formatCurrency(proRata.perSeatProRata, currency)}`,
             `  Total: ${formatCurrency(proRata.perSeatProRata, currency)} × ${additionalSeats} = ${formatCurrency(proRata.totalAmount, currency)}`,
+            ``,
+            `Xero invoice entry:`,
+            `  Description: ${subscription.product.name} – Pro rata (${format(proRata.periodStart, "d MMM")} – ${format(proRata.periodEnd, "d MMM yyyy")})`,
+            `  Quantity:    ${xeroQtyAddSeats}  (${proRata.daysRemaining} days ÷ ${proRata.daysInMonth} days in month)`,
+            `  Unit price:  ${formatCurrency(xeroUnitPriceAddSeats, currency)}  (${additionalSeats} seat${additionalSeats !== 1 ? "s" : ""} × ${formatCurrency(pricePerSeat, currency)}/month)`,
+            `  Line total:  ${formatCurrency(proRata.totalAmount, currency)}`,
             ``,
             `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
           ].join("\n"),

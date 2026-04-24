@@ -14,6 +14,7 @@ interface AuditEntry {
   xeroInstructionsGen: boolean;
   scheduledChangeCreated: boolean;
   createdAt: string;
+  customerName: string | null;
   user: { id: string; name: string; email: string };
 }
 
@@ -102,6 +103,7 @@ export default function AuditLogPage() {
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Timestamp</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Action</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Entity</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Details</th>
@@ -115,6 +117,9 @@ export default function AuditLogPage() {
                       {new Date(entry.createdAt).toLocaleString("en-ZA")}
                     </td>
                     <td className="px-6 py-4 text-sm text-slate-900">{entry.user.name}</td>
+                    <td className="px-6 py-4 text-sm text-slate-700 whitespace-nowrap">
+                      {entry.customerName ?? <span className="text-slate-400">—</span>}
+                    </td>
                     <td className="px-6 py-4 text-sm">
                       <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getActionBadge(entry.action)}`}>
                         {entry.action}

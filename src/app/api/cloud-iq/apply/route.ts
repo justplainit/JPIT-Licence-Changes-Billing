@@ -22,6 +22,9 @@ interface ApplyRequest {
   applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
   customerId?: string;
   productId?: string;
+  termType?: "ANNUAL" | "MONTHLY" | "THREE_YEAR";
+  billingFrequency?: "MONTHLY" | "ANNUAL";
+  startDate?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -32,9 +35,10 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId, termType, billingFrequency, startDate } = body;
 
-    if (!subscriptionDbId) {
+    // new_subscription does not have a subscriptionDbId yet — it will be created
+    if (!subscriptionDbId && applyType !== "new_subscription") {
       return NextResponse.json(
         { error: "subscriptionDbId is required" },
         { status: 400 }
@@ -222,6 +226,9 @@ export async function POST(request: NextRequest) {
       }
 
       const seatCount = newQuantity || 1;
+      const resolvedTermType = termType ?? "ANNUAL";
+      const resolvedBillingFrequency = billingFrequency ?? "MONTHLY";
+      const subscriptionStartDate = startDate ? new Date(startDate) : changeDateObj;
 
       const result = await prisma.$transaction(async (tx) => {
         const customer = await tx.customer.findUnique({ where: { id: customerId } });
@@ -230,20 +237,26 @@ export async function POST(request: NextRequest) {
         const product = await tx.product.findUnique({ where: { id: productId } });
         if (!product) throw new Error("Product not found");
 
-        // Calculate dates based on ANNUAL term
-        const startDate = changeDateObj;
-        const renewalDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
-        const termEndDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
+        // Calculate renewal/term end dates based on term type
+        let renewalDate: Date;
+        if (resolvedTermType === "MONTHLY") {
+          renewalDate = new Date(subscriptionStartDate.getFullYear(), subscriptionStartDate.getMonth() + 1, 1);
+        } else if (resolvedTermType === "THREE_YEAR") {
+          renewalDate = new Date(subscriptionStartDate.getFullYear() + 3, subscriptionStartDate.getMonth(), 1);
+        } else {
+          renewalDate = new Date(subscriptionStartDate.getFullYear() + 1, subscriptionStartDate.getMonth(), 1);
+        }
+        const termEndDate = renewalDate;
 
         // Create the subscription
         const subscription = await tx.subscription.create({
           data: {
             customerId,
             productId,
-            termType: "ANNUAL",
-            billingFrequency: "MONTHLY",
+            termType: resolvedTermType,
+            billingFrequency: resolvedBillingFrequency,
             seatCount,
-            startDate,
+            startDate: subscriptionStartDate,
             renewalDate,
             termEndDate,
             autoRenew: true,
@@ -253,7 +266,7 @@ export async function POST(request: NextRequest) {
         });
 
         // Create 7-day window
-        const { opensAt, closesAt } = calculate7DayWindow(startDate);
+        const { opensAt, closesAt } = calculate7DayWindow(subscriptionStartDate);
         await tx.sevenDayWindow.create({
           data: {
             subscriptionId: subscription.id,
@@ -276,8 +289,8 @@ export async function POST(request: NextRequest) {
 
         const pricePerSeat = customerPrice?.pricePerSeat ?? 0;
         const currency = customerPrice?.currency ?? customer.currency ?? "ZAR";
-        const dateStr = format(changeDateObj, "d MMMM yyyy");
-        const nextMonthDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+        const dateStr = format(subscriptionStartDate, "d MMMM yyyy");
+        const nextMonthDate = new Date(subscriptionStartDate.getFullYear(), subscriptionStartDate.getMonth() + 1, 1);
         const nextMonthName = format(nextMonthDate, "MMMM yyyy");
         const monthlyTotal = pricePerSeat * seatCount;
 
@@ -287,7 +300,7 @@ export async function POST(request: NextRequest) {
             subscriptionId: subscription.id,
             changeType: "NEW_SUBSCRIPTION",
             status: "APPLIED",
-            effectiveDate: startDate,
+            effectiveDate: subscriptionStartDate,
             previousSeatCount: 0,
             newSeatCount: seatCount,
             billingCurrency: currency,
@@ -313,7 +326,7 @@ export async function POST(request: NextRequest) {
         const proRata = calculateProRata({
           pricePerSeat,
           additionalSeats: seatCount,
-          changeDate: changeDateObj,
+          changeDate: subscriptionStartDate,
           currency,
         });
 
@@ -324,7 +337,7 @@ export async function POST(request: NextRequest) {
             productName: product.name,
             pricePerSeat,
             additionalSeats: seatCount,
-            changeDate: changeDateObj,
+            changeDate: subscriptionStartDate,
             currentSeatCount: 0,
             currency,
           });

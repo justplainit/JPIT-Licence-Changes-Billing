@@ -211,10 +211,11 @@ export async function POST(request: NextRequest) {
         });
 
         const hasAnyMatch = customer || product;
-
-        // Check if this is a "New subscription was created" event with both customer and product found
+        // Offer to create a subscription whenever both customer and product are
+        // resolved — regardless of the exact event wording. Crayon may send
+        // "State changed from Pending to Active" or other variants for new subs.
         const isNewSubscriptionEvent = /new subscription.*was created/i.test(notification.event);
-        const isNewSub = isNewSubscriptionEvent && customer && product;
+        const isNewSub = !!(customer && product);
 
         results.push({
           notification,
@@ -228,7 +229,9 @@ export async function POST(request: NextRequest) {
             seatDifference: null,
             status: isNewSub ? "new_subscription" : hasAnyMatch ? "partial" : "new",
             details: isNewSub
-              ? `New subscription detected: ${customer!.name} – ${product!.name}. Ready to create subscription and set up billing.`
+              ? (isNewSubscriptionEvent
+                  ? `New subscription detected: ${customer!.name} – ${product!.name}. Ready to create subscription and set up billing.`
+                  : `No existing subscription found for ${customer!.name} – ${product!.name}. You can create it as a new subscription.`)
               : hasAnyMatch
                 ? `Partial match: ${customer ? "Customer found" : "Customer not found"}, ${product ? "Product found" : "Product not found"}. No matching active subscription.`
                 : `No matching customer or product found. Customer: "${notification.cloudAccount}", Product: "${notification.product}"`,

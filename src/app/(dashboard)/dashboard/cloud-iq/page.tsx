@@ -53,15 +53,21 @@ interface ApplyResult {
   invoiceDraft?: string;
 }
 
+interface NewSubForm {
+  seats: number;
+  termType: "ANNUAL" | "MONTHLY" | "THREE_YEAR";
+  billingFrequency: "MONTHLY" | "ANNUAL";
+  startDate: string;
+}
+
 export default function CloudIQPage() {
   const [text, setText] = useState("");
   const [results, setResults] = useState<NotificationResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [parsed, setParsed] = useState(false);
   const [applyingIndex, setApplyingIndex] = useState<number | null>(null);
-  const [appliedResults, setAppliedResults] = useState<
-    Record<number, ApplyResult>
-  >({});
+  const [appliedResults, setAppliedResults] = useState<Record<number, ApplyResult>>({});
+  const [newSubForms, setNewSubForms] = useState<Record<number, NewSubForm>>({});
 
   const handleParse = async () => {
     if (!text.trim()) {
@@ -88,6 +94,23 @@ export default function CloudIQPage() {
 
       setResults(data.results);
       setParsed(true);
+
+      // Pre-populate new subscription forms from notification data
+      const forms: Record<number, NewSubForm> = {};
+      (data.results as NotificationResult[]).forEach((r, i) => {
+        if (r.match.status === "new_subscription") {
+          // Parse date from notification time, fall back to today
+          let parsedDate = new Date(r.notification.time);
+          if (isNaN(parsedDate.getTime())) parsedDate = new Date();
+          forms[i] = {
+            seats: r.notification.quantity || 1,
+            termType: "ANNUAL",
+            billingFrequency: "MONTHLY",
+            startDate: parsedDate.toISOString().split("T")[0],
+          };
+        }
+      });
+      setNewSubForms(forms);
 
       const matched = data.results.filter(
         (r: NotificationResult) => r.match.status === "matched"
@@ -125,6 +148,8 @@ export default function CloudIQPage() {
     if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription) return;
     if (!isNewSubscription && !result.match.subscriptionDbId) return;
 
+    const form = newSubForms[index];
+
     setApplyingIndex(index);
     try {
       const res = await fetch("/api/cloud-iq/apply", {
@@ -132,7 +157,7 @@ export default function CloudIQPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           subscriptionDbId: result.match.subscriptionDbId || "",
-          newQuantity: result.notification.quantity || 1,
+          newQuantity: isNewSubscription ? (form?.seats ?? result.notification.quantity ?? 1) : (result.notification.quantity || 1),
           notificationTime: result.notification.time,
           notificationEvent: result.notification.event,
           notificationSubscriptionId: result.notification.subscriptionId,
@@ -140,6 +165,9 @@ export default function CloudIQPage() {
           ...(isNewSubscription && {
             customerId: result.match.customerId,
             productId: result.match.productId,
+            termType: form?.termType ?? "ANNUAL",
+            billingFrequency: form?.billingFrequency ?? "MONTHLY",
+            startDate: form?.startDate,
           }),
         }),
       });
@@ -167,6 +195,7 @@ export default function CloudIQPage() {
     setResults([]);
     setParsed(false);
     setAppliedResults({});
+    setNewSubForms({});
   };
 
   const statusColors: Record<string, string> = {
@@ -390,19 +419,79 @@ export default function CloudIQPage() {
                       </div>
                     )}
 
-                  {/* New subscription details */}
-                  {result.match.status === "new_subscription" && (
-                    <div className="rounded-md bg-white/70 p-3 text-sm">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <p className="text-xs text-slate-500">Product</p>
-                          <p className="font-medium text-slate-900">{result.match.productName}</p>
+                  {/* New subscription confirmation form */}
+                  {result.match.status === "new_subscription" && !appliedResults[index] && newSubForms[index] && (
+                    <div className="rounded-md border border-emerald-300 bg-white/80 p-4 space-y-3">
+                      <p className="text-xs font-semibold text-emerald-800 uppercase tracking-wide">
+                        Confirm New Subscription Details
+                      </p>
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <div className="space-y-1">
+                          <label className="text-xs text-slate-500">Seats</label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={newSubForms[index].seats}
+                            onChange={(e) =>
+                              setNewSubForms((prev) => ({
+                                ...prev,
+                                [index]: { ...prev[index], seats: parseInt(e.target.value) || 1 },
+                              }))
+                            }
+                            className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-emerald-400 focus:outline-none"
+                          />
                         </div>
-                        <div>
-                          <p className="text-xs text-slate-500">Quantity</p>
-                          <p className="text-lg font-bold text-emerald-600">{result.notification.quantity || 1} seat{(result.notification.quantity || 1) !== 1 ? "s" : ""}</p>
+                        <div className="space-y-1">
+                          <label className="text-xs text-slate-500">Term Type</label>
+                          <select
+                            value={newSubForms[index].termType}
+                            onChange={(e) =>
+                              setNewSubForms((prev) => ({
+                                ...prev,
+                                [index]: { ...prev[index], termType: e.target.value as NewSubForm["termType"] },
+                              }))
+                            }
+                            className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-emerald-400 focus:outline-none"
+                          >
+                            <option value="ANNUAL">Annual</option>
+                            <option value="MONTHLY">Monthly</option>
+                            <option value="THREE_YEAR">3 Year</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs text-slate-500">Billing</label>
+                          <select
+                            value={newSubForms[index].billingFrequency}
+                            onChange={(e) =>
+                              setNewSubForms((prev) => ({
+                                ...prev,
+                                [index]: { ...prev[index], billingFrequency: e.target.value as NewSubForm["billingFrequency"] },
+                              }))
+                            }
+                            className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-emerald-400 focus:outline-none"
+                          >
+                            <option value="MONTHLY">Monthly</option>
+                            <option value="ANNUAL">Annual</option>
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-xs text-slate-500">Start Date</label>
+                          <input
+                            type="date"
+                            value={newSubForms[index].startDate}
+                            onChange={(e) =>
+                              setNewSubForms((prev) => ({
+                                ...prev,
+                                [index]: { ...prev[index], startDate: e.target.value },
+                              }))
+                            }
+                            className="w-full rounded border border-slate-300 px-2 py-1.5 text-sm focus:border-emerald-400 focus:outline-none"
+                          />
                         </div>
                       </div>
+                      <p className="text-xs text-slate-500">
+                        Creating will record the subscription, open a 7-day window, generate a pro-rata invoice task, and add a repeating invoice task to the amendment queue.
+                      </p>
                     </div>
                   )}
 
@@ -479,15 +568,15 @@ export default function CloudIQPage() {
                 {/* Action button for new subscription */}
                 {result.match.status === "new_subscription" &&
                   !appliedResults[index] && (
-                    <div className="ml-4">
+                    <div className="ml-4 shrink-0">
                       <Button
                         onClick={() => handleApply(index, result)}
-                        disabled={applyingIndex === index}
+                        disabled={applyingIndex === index || !newSubForms[index]}
                         className="bg-emerald-600 hover:bg-emerald-700 text-white"
                       >
                         {applyingIndex === index
                           ? "Creating..."
-                          : "Create Subscription"}
+                          : "Confirm & Create"}
                       </Button>
                     </div>
                   )}

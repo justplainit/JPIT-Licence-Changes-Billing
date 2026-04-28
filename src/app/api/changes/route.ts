@@ -5,6 +5,7 @@ import { ChangeType } from "@/generated/prisma";
 import {
   calculateProRata,
   calculateSeatReductionCredit,
+  calculateRenewalWindowReduction,
   calculateUpgradeCost,
   calculate7DayWindow,
   formatCurrency,
@@ -313,7 +314,156 @@ export async function POST(request: NextRequest) {
             ? subscription.sevenDayWindows[0]
             : null;
 
-          if (openWindow) {
+          if (openWindow && openWindow.windowType === "RENEWAL") {
+            // RENEWAL WINDOW: usage charge (renewal date → reduction date) + full-month credit
+            const renewalDate = openWindow.opensAt;
+            const renewalCalc = calculateRenewalWindowReduction({
+              pricePerSeat,
+              seatsRemoved,
+              renewalDate,
+              reductionDate: changeDateObj,
+              currency,
+            });
+
+            await tx.subscription.update({
+              where: { id: subscriptionId },
+              data: { seatCount: newSeatCount },
+            });
+
+            const change = await tx.subscriptionChange.create({
+              data: {
+                subscriptionId,
+                changeType: "REMOVE_SEATS",
+                status: "APPLIED",
+                effectiveDate: changeDateObj,
+                previousSeatCount,
+                newSeatCount,
+                proRataAmount: -renewalCalc.netRefund,
+                proRataDays: renewalCalc.daysUsed,
+                proRataDailyRate: renewalCalc.dailyRate,
+                billingCurrency: currency,
+                notes: notes || "Within 7-day renewal window — usage charge issued, full month credit applied",
+                createdById: session.user!.id!,
+              },
+            });
+
+            const dateStr = format(changeDateObj, "d MMMM yyyy");
+            const nextMonthDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+            const nextMonthName = format(nextMonthDate, "MMMM yyyy");
+            const xeroUsageQty = (renewalCalc.daysUsed / renewalCalc.daysInMonth).toFixed(5);
+            const xeroUsageUnitPrice = pricePerSeat * seatsRemoved;
+            const newMonthlyTotal = pricePerSeat * newSeatCount;
+
+            // Task 1: CREDIT NOTE — full month refund for removed seats
+            await tx.amendmentQueueItem.create({
+              data: {
+                customerId: subscription.customerId,
+                description: [
+                  `ISSUE CREDIT NOTE to ${subscription.customer.name}`,
+                  ``,
+                  `Amount: ${formatCurrency(renewalCalc.totalMonthlyCredit, currency)} (excl. VAT)`,
+                  `Product: ${subscription.product.name}`,
+                  `Reason: ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} removed within 7-day renewal window`,
+                  ``,
+                  `This reverses the full monthly charge for the ${seatsRemoved} removed seat${seatsRemoved !== 1 ? "s" : ""}.`,
+                  `Credit: ${formatCurrency(pricePerSeat, currency)}/seat × ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} = ${formatCurrency(renewalCalc.totalMonthlyCredit, currency)}`,
+                  ``,
+                  `Create a credit note in Xero for ${formatCurrency(renewalCalc.totalMonthlyCredit, currency)}.`,
+                ].join("\n"),
+                productName: subscription.product.name,
+                newMonthlyAmount: -renewalCalc.totalMonthlyCredit,
+                newSeatCount: seatsRemoved,
+                actionByDate: changeDateObj,
+                reason: `Renewal window credit note for ${seatsRemoved} removed seat${seatsRemoved !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+                proRataAmount: -renewalCalc.totalMonthlyCredit,
+              },
+            });
+
+            // Task 2: USAGE INVOICE — charge for days used (renewal date → reduction date)
+            await tx.amendmentQueueItem.create({
+              data: {
+                customerId: subscription.customerId,
+                description: [
+                  `SEND USAGE INVOICE to ${subscription.customer.name}`,
+                  ``,
+                  `Amount: ${formatCurrency(renewalCalc.totalUsageCharge, currency)} (excl. VAT)`,
+                  `Product: ${subscription.product.name}`,
+                  `Reason: Usage charge for ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} from renewal to reduction`,
+                  `Period: ${format(renewalCalc.periodStart, "d MMM")} – ${format(renewalCalc.periodEnd, "d MMM yyyy")} (${renewalCalc.daysUsed} days)`,
+                  ``,
+                  `Calculation:`,
+                  `  Rate per seat: ${formatCurrency(pricePerSeat, currency)}/month`,
+                  `  Daily rate: ${formatCurrency(renewalCalc.dailyRate, currency)} (${formatCurrency(pricePerSeat, currency)} ÷ ${renewalCalc.daysInMonth} days)`,
+                  `  Days used: ${renewalCalc.daysUsed}`,
+                  `  Per seat: ${formatCurrency(renewalCalc.usagePerSeat, currency)}`,
+                  `  Total: ${formatCurrency(renewalCalc.usagePerSeat, currency)} × ${seatsRemoved} = ${formatCurrency(renewalCalc.totalUsageCharge, currency)}`,
+                  ``,
+                  `Xero invoice entry:`,
+                  `  Description: ${subscription.product.name} – Usage (${format(renewalCalc.periodStart, "d MMM")} – ${format(renewalCalc.periodEnd, "d MMM yyyy")})`,
+                  `  Quantity:    ${xeroUsageQty}  (${renewalCalc.daysUsed} days ÷ ${renewalCalc.daysInMonth} days in month)`,
+                  `  Unit price:  ${formatCurrency(xeroUsageUnitPrice, currency)}  (${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} × ${formatCurrency(pricePerSeat, currency)}/month)`,
+                  `  Line total:  ${formatCurrency(renewalCalc.totalUsageCharge, currency)}`,
+                  ``,
+                  `Net refund to customer: ${formatCurrency(renewalCalc.totalMonthlyCredit, currency)} − ${formatCurrency(renewalCalc.totalUsageCharge, currency)} = ${formatCurrency(renewalCalc.netRefund, currency)}`,
+                  `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
+                ].join("\n"),
+                productName: subscription.product.name,
+                newMonthlyAmount: renewalCalc.totalUsageCharge,
+                newSeatCount: seatsRemoved,
+                actionByDate: changeDateObj,
+                reason: `Usage invoice for ${seatsRemoved} removed seat${seatsRemoved !== 1 ? "s" : ""} (renewal window) – ${subscription.customer.name}`,
+                proRataFraction: Math.round((renewalCalc.daysUsed / renewalCalc.daysInMonth) * 10000) / 10000,
+                proRataDays: renewalCalc.daysUsed,
+                proRataDaysInMonth: renewalCalc.daysInMonth,
+                proRataAmount: renewalCalc.totalUsageCharge,
+              },
+            });
+
+            // Task 3: UPDATE repeating invoice from next month
+            await tx.amendmentQueueItem.create({
+              data: {
+                customerId: subscription.customerId,
+                description: [
+                  `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
+                  ``,
+                  `Product: ${subscription.product.name}`,
+                  `Change: ${previousSeatCount} seats → ${newSeatCount} seats`,
+                  `New monthly amount: ${formatCurrency(newMonthlyTotal, currency)} (${newSeatCount} × ${formatCurrency(pricePerSeat, currency)})`,
+                  `Effective from: 1 ${nextMonthName}`,
+                  ``,
+                  `Update the repeating invoice so that from 1 ${nextMonthName} it reflects ${newSeatCount} seats.`,
+                ].join("\n"),
+                productName: subscription.product.name,
+                newMonthlyAmount: newMonthlyTotal,
+                newSeatCount,
+                actionByDate: nextMonthDate,
+                reason: `Seat decrease (renewal window): ${previousSeatCount} → ${newSeatCount} effective ${dateStr}`,
+              },
+            });
+
+            await tx.auditLog.create({
+              data: {
+                userId: session.user!.id!,
+                action: "REMOVE_SEATS",
+                entityType: "Subscription",
+                entityId: subscriptionId,
+                details: `Removed ${seatsRemoved} seats within 7-day RENEWAL window (${previousSeatCount} → ${newSeatCount}). Usage charge: ${formatCurrency(renewalCalc.totalUsageCharge, currency)}. Net refund: ${formatCurrency(renewalCalc.netRefund, currency)}.`,
+                proRataAmount: -renewalCalc.netRefund,
+                sevenDayWindowOpen: true,
+                xeroInstructionsGen: true,
+              },
+            });
+
+            return {
+              change,
+              renewalWindowReduction: renewalCalc,
+              withinWindow: true,
+              windowType: "RENEWAL",
+              message: `Renewal window seat reduction: ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} removed. Usage invoice: ${formatCurrency(renewalCalc.totalUsageCharge, currency)} (excl. VAT). Full month credit: ${formatCurrency(renewalCalc.totalMonthlyCredit, currency)}. Net refund: ${formatCurrency(renewalCalc.netRefund, currency)}.`,
+            };
+
+          } else if (openWindow) {
+            // MID_TERM_ADDITION / NEW_SUBSCRIPTION window
             // Check if this is a full reversal (grace period cancellation)
             const originalChange = openWindow.changeId
               ? await tx.subscriptionChange.findUnique({ where: { id: openWindow.changeId } })
@@ -791,6 +941,75 @@ export async function POST(request: NextRequest) {
           return {
             change,
             message: "Downgrade applied immediately (monthly term)",
+          };
+        }
+
+        // =====================================================================
+        // RENEWAL — record the renewal and open a 7-day modification window
+        // =====================================================================
+        case "RENEWAL": {
+          // Calculate new renewal/term-end dates based on term type
+          let newRenewalDate: Date;
+          if (subscription.termType === "MONTHLY") {
+            newRenewalDate = new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1);
+          } else if (subscription.termType === "THREE_YEAR") {
+            newRenewalDate = new Date(changeDateObj.getFullYear() + 3, changeDateObj.getMonth(), 1);
+          } else {
+            newRenewalDate = new Date(changeDateObj.getFullYear() + 1, changeDateObj.getMonth(), 1);
+          }
+
+          await tx.subscription.update({
+            where: { id: subscriptionId },
+            data: {
+              startDate: changeDateObj,
+              renewalDate: newRenewalDate,
+              termEndDate: newRenewalDate,
+              status: "ACTIVE",
+            },
+          });
+
+          const change = await tx.subscriptionChange.create({
+            data: {
+              subscriptionId,
+              changeType: "RENEWAL",
+              status: "APPLIED",
+              effectiveDate: changeDateObj,
+              previousSeatCount: subscription.seatCount,
+              newSeatCount: subscription.seatCount,
+              billingCurrency: currency,
+              notes,
+              createdById: session.user!.id!,
+            },
+          });
+
+          // Open 7-day RENEWAL window — seat reductions are allowed immediately
+          const { opensAt, closesAt } = calculate7DayWindow(changeDateObj);
+          await tx.sevenDayWindow.create({
+            data: {
+              subscriptionId,
+              changeId: change.id,
+              windowType: "RENEWAL",
+              opensAt,
+              closesAt,
+              seatsAffected: subscription.seatCount,
+            },
+          });
+
+          await tx.auditLog.create({
+            data: {
+              userId: session.user!.id!,
+              action: "RENEWAL",
+              entityType: "Subscription",
+              entityId: subscriptionId,
+              details: `Subscription renewed. Next renewal: ${format(newRenewalDate, "d MMMM yyyy")}. 7-day modification window open until ${format(closesAt, "d MMMM yyyy")}.`,
+              sevenDayWindowOpen: true,
+            },
+          });
+
+          return {
+            change,
+            message: `Subscription renewed. Next renewal: ${format(newRenewalDate, "d MMMM yyyy")}. 7-day modification window open until ${format(closesAt, "d MMMM yyyy")}.`,
+            windowClosesAt: closesAt.toISOString(),
           };
         }
 

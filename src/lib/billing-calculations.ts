@@ -219,6 +219,69 @@ export function calculateUpgradeCost(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Renewal window seat reduction: charge for days used, credit full month
+// ---------------------------------------------------------------------------
+
+export interface RenewalWindowReductionResult {
+  daysUsed: number;
+  daysInMonth: number;
+  dailyRate: number;
+  usagePerSeat: number;
+  totalUsageCharge: number;
+  totalMonthlyCredit: number;
+  netRefund: number;
+  periodStart: Date;
+  periodEnd: Date;
+  breakdown: string;
+}
+
+export function calculateRenewalWindowReduction(params: {
+  pricePerSeat: number;
+  seatsRemoved: number;
+  renewalDate: Date;
+  reductionDate: Date;
+  currency?: string;
+}): RenewalWindowReductionResult {
+  const { pricePerSeat, seatsRemoved, renewalDate, reductionDate, currency = "ZAR" } = params;
+
+  const daysInMonth = getDaysInMonth(renewalDate);
+  const periodStart = startOfDay(renewalDate);
+  const periodEnd = startOfDay(reductionDate);
+  // Inclusive of both renewal date and reduction date
+  const daysUsed = differenceInCalendarDays(periodEnd, periodStart) + 1;
+
+  const dailyRate = roundTo2(pricePerSeat / daysInMonth);
+  const usagePerSeat = roundTo2(dailyRate * daysUsed);
+  const totalUsageCharge = roundTo2(usagePerSeat * seatsRemoved);
+  const totalMonthlyCredit = roundTo2(pricePerSeat * seatsRemoved);
+  const netRefund = roundTo2(totalMonthlyCredit - totalUsageCharge);
+
+  const sym = currencySymbol(currency);
+  const breakdown = [
+    `Customer's agreed rate per seat: ${sym}${pricePerSeat.toFixed(2)}/month`,
+    `Daily rate: ${sym}${pricePerSeat.toFixed(2)} ÷ ${daysInMonth} = ${sym}${dailyRate.toFixed(2)}`,
+    `Days used: ${daysUsed} (${format(periodStart, "d MMM")} – ${format(periodEnd, "d MMM yyyy")} inclusive)`,
+    `Usage per seat: ${sym}${dailyRate.toFixed(2)} × ${daysUsed} = ${sym}${usagePerSeat.toFixed(2)}`,
+    `Total usage charge: ${sym}${usagePerSeat.toFixed(2)} × ${seatsRemoved} = ${sym}${totalUsageCharge.toFixed(2)}`,
+    `Full month credit: ${sym}${pricePerSeat.toFixed(2)} × ${seatsRemoved} = ${sym}${totalMonthlyCredit.toFixed(2)}`,
+    `Net refund to customer: ${sym}${totalMonthlyCredit.toFixed(2)} − ${sym}${totalUsageCharge.toFixed(2)} = ${sym}${netRefund.toFixed(2)}`,
+  ].join("\n");
+
+  return {
+    daysUsed,
+    daysInMonth,
+    dailyRate,
+    usagePerSeat,
+    totalUsageCharge,
+    totalMonthlyCredit,
+    netRefund,
+    periodStart,
+    periodEnd,
+    breakdown,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 7-day cancellation / reduction window helpers
 // ---------------------------------------------------------------------------
 

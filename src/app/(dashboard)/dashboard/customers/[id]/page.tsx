@@ -632,18 +632,28 @@ export default function CustomerDetailPage() {
 
                   {/* Scheduled changes */}
                   {sub.scheduledChanges.length > 0 && !isEditing && (
-                    <div className="border-t border-gray-100 bg-gray-50 px-4 py-2">
-                      <p className="text-xs text-slate-500">
-                        Scheduled:{" "}
-                        {sub.scheduledChanges.map((sc) => (
-                          <span key={sc.id} className="font-medium">
-                            {sc.changeType.replace("_", " ").toLowerCase()}
-                            {sc.targetSeatCount != null &&
-                              ` to ${sc.targetSeatCount} seats`}{" "}
-                            on {formatDate(sc.scheduledDate)}
+                    <div className="border-t border-gray-100 bg-gray-50 px-4 py-2 flex flex-wrap items-center gap-1.5">
+                      <span className="text-xs text-slate-500">Scheduled:</span>
+                      {sub.scheduledChanges.map((sc) => {
+                        const isOverdue = new Date(sc.scheduledDate) < new Date();
+                        return (
+                          <span
+                            key={sc.id}
+                            className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${
+                              isOverdue
+                                ? "bg-red-100 text-red-700"
+                                : "bg-blue-100 text-blue-700"
+                            }`}
+                          >
+                            {sc.changeType === "REMOVE_SEATS" && sc.targetSeatCount != null
+                              ? `Reduce to ${sc.targetSeatCount} seats`
+                              : sc.changeType.replace("_", " ").toLowerCase()}
+                            {" on "}
+                            {formatDate(sc.scheduledDate)}
+                            {isOverdue && " — OVERDUE"}
                           </span>
-                        ))}
-                      </p>
+                        );
+                      })}
                     </div>
                   )}
                 </div>

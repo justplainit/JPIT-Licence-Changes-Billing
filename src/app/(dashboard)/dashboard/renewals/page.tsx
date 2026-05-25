@@ -137,12 +137,17 @@ export default function RenewalsPage() {
   };
 
   const upcomingRenewals = subscriptions.filter(
-    (s) => getDaysUntilRenewal(s.renewalDate) <= 60
+    (s) => getDaysUntilRenewal(s.renewalDate) <= 60 && getDaysUntilRenewal(s.renewalDate) > 0
   );
   const withScheduledChanges = subscriptions.filter(
     (s) =>
       s.scheduledChanges &&
       s.scheduledChanges.some((sc) => sc.status === "PENDING")
+  );
+  const overdueScheduledChanges = subscriptions.filter((s) =>
+    s.scheduledChanges?.some(
+      (sc) => sc.status === "PENDING" && new Date(sc.scheduledDate) < now
+    )
   );
 
   if (loading) {
@@ -184,7 +189,17 @@ export default function RenewalsPage() {
       </div>
 
       {/* Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <Card className={overdueScheduledChanges.length > 0 ? "border-red-400 bg-red-50" : ""}>
+          <CardHeader className="pb-2">
+            <CardDescription className={overdueScheduledChanges.length > 0 ? "text-red-700 font-semibold" : ""}>
+              Overdue — Action Required
+            </CardDescription>
+            <CardTitle className="text-3xl text-red-600">
+              {overdueScheduledChanges.length}
+            </CardTitle>
+          </CardHeader>
+        </Card>
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Renewing in 7 days</CardDescription>
@@ -277,6 +292,65 @@ export default function RenewalsPage() {
         </Card>
       ) : (
         <>
+          {/* Overdue Scheduled Changes — ACTION REQUIRED */}
+          {overdueScheduledChanges.length > 0 && (
+            <Card className="border-red-400">
+              <CardHeader>
+                <CardTitle className="text-red-700">
+                  ⚠ Overdue — Action Required ({overdueScheduledChanges.length})
+                </CardTitle>
+                <CardDescription className="text-red-600">
+                  These scheduled changes are past their action date and have not been actioned.
+                  Apply in Crayon/Partner Center and update the repeating invoice in Xero immediately.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-3">
+                  {overdueScheduledChanges.map((sub) =>
+                    sub.scheduledChanges
+                      ?.filter(
+                        (sc) =>
+                          sc.status === "PENDING" &&
+                          new Date(sc.scheduledDate) < now
+                      )
+                      .map((sc) => (
+                        <div
+                          key={sc.id}
+                          className="border border-red-300 rounded-lg p-4 bg-red-50"
+                        >
+                          <div className="flex items-start justify-between">
+                            <div>
+                              <p className="font-medium text-gray-900">
+                                {sub.customer.name} — {sub.product.name}
+                              </p>
+                              <p className="text-sm text-gray-700 mt-1">
+                                {sc.changeType === "REMOVE_SEATS"
+                                  ? `Decrease from ${sub.seatCount} to ${sc.targetSeatCount} seats`
+                                  : sc.changeType}
+                              </p>
+                              <p className="text-sm text-red-600 font-medium mt-1">
+                                Was due:{" "}
+                                {new Date(sc.scheduledDate).toLocaleDateString("en-ZA")}
+                              </p>
+                            </div>
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-200 text-red-800">
+                              Overdue
+                            </span>
+                          </div>
+                          <div className="mt-3 text-xs text-gray-600 bg-white rounded p-2 border border-red-200">
+                            <strong>Action required:</strong> Apply the change in Crayon/Partner Center,
+                            then update the repeating invoice in Xero. Current seat count in system:{" "}
+                            <strong>{sub.seatCount}</strong> → should be{" "}
+                            <strong>{sc.targetSeatCount}</strong>.
+                          </div>
+                        </div>
+                      ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Upcoming Renewals Table */}
           <Card>
             <CardHeader>

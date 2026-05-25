@@ -975,13 +975,48 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      await tx.scheduledChange.create({
-        data: {
+      // Upsert: update existing PENDING scheduled change rather than stacking duplicates
+      const existingScheduled = await tx.scheduledChange.findFirst({
+        where: {
           subscriptionId: subscriptionDbId,
           changeType: "REMOVE_SEATS",
-          scheduledDate: subscription.renewalDate,
-          targetSeatCount: newQuantity,
-          notes: `Cloud-iQ: Reduce seats from ${previousSeatCount} to ${newQuantity} at renewal`,
+          status: "PENDING",
+        },
+      });
+
+      if (existingScheduled) {
+        await tx.scheduledChange.update({
+          where: { id: existingScheduled.id },
+          data: {
+            targetSeatCount: newQuantity,
+            scheduledDate: subscription.renewalDate,
+            notes: `Cloud-iQ: Updated seat reduction target to ${newQuantity} (was ${existingScheduled.targetSeatCount}). Event: ${notificationEvent}`,
+          },
+        });
+      } else {
+        await tx.scheduledChange.create({
+          data: {
+            subscriptionId: subscriptionDbId,
+            changeType: "REMOVE_SEATS",
+            scheduledDate: subscription.renewalDate,
+            targetSeatCount: newQuantity,
+            notes: `Cloud-iQ: Reduce seats from ${previousSeatCount} to ${newQuantity} at renewal. Event: ${notificationEvent}`,
+          },
+        });
+      }
+
+      // Cancel any existing incomplete scheduled amendment items for this product
+      // so billing staff don't action stale instructions
+      await tx.amendmentQueueItem.updateMany({
+        where: {
+          customerId: subscription.customerId,
+          productName: subscription.product.name,
+          isCompleted: false,
+          isScheduledChange: true,
+        },
+        data: {
+          isCompleted: true,
+          completedAt: new Date(),
         },
       });
 

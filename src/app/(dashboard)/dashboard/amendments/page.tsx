@@ -159,8 +159,8 @@ export default function AmendmentsPage() {
                       </p>
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                         <div className="rounded bg-white p-2 text-center border border-blue-200">
-                          <p className="text-[10px] text-slate-500 uppercase">Quantity</p>
-                          <p className="text-2xl font-bold text-blue-700">{item.proRataFraction.toFixed(2)}</p>
+                          <p className="text-[10px] text-slate-500 uppercase">Quantity (Xero)</p>
+                          <p className="text-2xl font-bold text-blue-700">{item.proRataFraction.toFixed(4)}</p>
                           <p className="text-[10px] text-slate-400">{item.proRataDays}/{item.proRataDaysInMonth} days</p>
                         </div>
                         <div className="rounded bg-white p-2 text-center border border-blue-200">

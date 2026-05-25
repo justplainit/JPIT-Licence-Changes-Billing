@@ -376,7 +376,7 @@ export async function POST(request: NextRequest) {
           newSeatCount: seatCount,
           actionByDate: changeDateObj,
           reason: `Pro-rata invoice for new subscription – ${customer.name}`,
-          proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 100) / 100,
+          proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 10000) / 10000,
           proRataDays: proRata.daysRemaining,
           proRataDaysInMonth: proRata.daysInMonth,
           proRataAmount: proRata.totalAmount,
@@ -511,6 +511,10 @@ export async function POST(request: NextRequest) {
         newSeatCount: number;
         actionByDate: Date;
         reason: string;
+        proRataFraction?: number;
+        proRataDays?: number;
+        proRataDaysInMonth?: number;
+        proRataAmount?: number;
       }> = [];
 
       // ================================================================
@@ -623,6 +627,10 @@ export async function POST(request: NextRequest) {
           newSeatCount: additionalSeats,
           actionByDate: changeDateObj,
           reason: `Pro-rata invoice for ${additionalSeats} new seat${additionalSeats !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+          proRataFraction: Math.round((proRata.daysRemaining / proRata.daysInMonth) * 10000) / 10000,
+          proRataDays: proRata.daysRemaining,
+          proRataDaysInMonth: proRata.daysInMonth,
+          proRataAmount: proRata.totalAmount,
         });
 
         // Task 2: Update repeating invoice from next month

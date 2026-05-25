@@ -61,6 +61,9 @@ export default function CloudIQPage() {
   const [applyingIndex, setApplyingIndex] = useState<number | null>(null);
   const [appliedResults, setAppliedResults] = useState<Record<number, ApplyResult>>({});
   const [applyErrors, setApplyErrors] = useState<Record<number, string>>({});
+  const [termSelectIndex, setTermSelectIndex] = useState<number | null>(null);
+  const [termType, setTermType] = useState<"MONTHLY" | "ANNUAL" | "THREE_YEAR">("MONTHLY");
+  const [billingFreq, setBillingFreq] = useState<"MONTHLY" | "ANNUAL">("MONTHLY");
 
   const handleParse = async () => {
     if (!text.trim()) {
@@ -114,7 +117,11 @@ export default function CloudIQPage() {
     }
   };
 
-  const handleApply = async (index: number, result: NotificationResult) => {
+  const handleApply = async (
+    index: number,
+    result: NotificationResult,
+    opts?: { termType?: "MONTHLY" | "ANNUAL" | "THREE_YEAR"; billingFrequency?: "MONTHLY" | "ANNUAL" }
+  ) => {
     const isCancellation = result.match.status === "cancellation";
     const isSuspension = result.match.status === "suspension";
     const isNewSubscription = result.match.status === "new_subscription";
@@ -148,6 +155,8 @@ export default function CloudIQPage() {
           ...(isNewSubscription && {
             customerId: result.match.customerId,
             productId: result.match.productId,
+            termType: opts?.termType ?? "MONTHLY",
+            billingFrequency: opts?.billingFrequency ?? "MONTHLY",
           }),
         }),
       });
@@ -162,6 +171,7 @@ export default function CloudIQPage() {
       }
 
       setAppliedResults((prev) => ({ ...prev, [index]: data }));
+      setTermSelectIndex(null);
       toast.success(
         `Change applied for ${result.match.customerName}. ${data.tasks.length} task(s) created for your accounting team.`
       );
@@ -180,6 +190,7 @@ export default function CloudIQPage() {
     setParsed(false);
     setAppliedResults({});
     setApplyErrors({});
+    setTermSelectIndex(null);
   };
 
   const statusColors: Record<string, string> = {
@@ -493,18 +504,74 @@ export default function CloudIQPage() {
                 {result.match.status === "new_subscription" &&
                   !appliedResults[index] && (
                     <div className="ml-4">
-                      <Button
-                        onClick={() => handleApply(index, result)}
-                        disabled={applyingIndex === index}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                      >
-                        {applyingIndex === index
-                          ? "Creating..."
-                          : "Create Subscription"}
-                      </Button>
+                      {termSelectIndex === index ? (
+                        <Button
+                          variant="outline"
+                          onClick={() => setTermSelectIndex(null)}
+                          disabled={applyingIndex === index}
+                        >
+                          Cancel
+                        </Button>
+                      ) : (
+                        <Button
+                          onClick={() => {
+                            setTermType("MONTHLY");
+                            setBillingFreq("MONTHLY");
+                            setTermSelectIndex(index);
+                          }}
+                          className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                        >
+                          Create Subscription
+                        </Button>
+                      )}
                     </div>
                   )}
               </div>
+
+              {/* Term selector for new subscriptions */}
+              {termSelectIndex === index && !appliedResults[index] && (
+                <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+                  <p className="text-sm font-semibold text-emerald-900 mb-3">Select subscription term:</p>
+                  <div className="space-y-2">
+                    {([
+                      { t: "MONTHLY", f: "MONTHLY", label: "Monthly (M2M)", desc: "Month-to-month · can reduce/cancel within 7-day window each month" },
+                      { t: "ANNUAL",  f: "MONTHLY", label: "Annual — monthly payments", desc: "12-month commitment · billed monthly" },
+                      { t: "ANNUAL",  f: "ANNUAL",  label: "Annual — annual payment", desc: "12-month commitment · paid upfront annually" },
+                      { t: "THREE_YEAR", f: "MONTHLY", label: "3-Year — monthly payments", desc: "36-month commitment · billed monthly" },
+                      { t: "THREE_YEAR", f: "ANNUAL",  label: "3-Year — annual payments", desc: "36-month commitment · billed annually" },
+                    ] as const).map((opt) => (
+                      <label
+                        key={`${opt.t}-${opt.f}`}
+                        className="flex items-start gap-3 cursor-pointer rounded-md px-3 py-2 hover:bg-emerald-100"
+                      >
+                        <input
+                          type="radio"
+                          name={`term-${index}`}
+                          className="mt-0.5"
+                          checked={termType === opt.t && billingFreq === opt.f}
+                          onChange={() => { setTermType(opt.t); setBillingFreq(opt.f); }}
+                        />
+                        <div>
+                          <p className="text-sm font-medium text-slate-900">{opt.label}</p>
+                          <p className="text-xs text-slate-500">{opt.desc}</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <Button
+                      onClick={() => handleApply(index, result, { termType, billingFrequency: billingFreq })}
+                      disabled={applyingIndex === index}
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                    >
+                      {applyingIndex === index ? "Creating…" : "Confirm & Create"}
+                    </Button>
+                    <Button variant="outline" onClick={() => setTermSelectIndex(null)} disabled={applyingIndex === index}>
+                      Cancel
+                    </Button>
+                  </div>
+                </div>
+              )}
 
               {/* Inline error display */}
               {applyErrors[index] && (

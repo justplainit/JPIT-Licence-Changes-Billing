@@ -22,6 +22,8 @@ interface ApplyRequest {
   applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
   customerId?: string;
   productId?: string;
+  termType?: "MONTHLY" | "ANNUAL" | "THREE_YEAR";
+  billingFrequency?: "MONTHLY" | "ANNUAL";
 }
 
 export async function POST(request: NextRequest) {
@@ -32,7 +34,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId, termType: reqTermType, billingFrequency: reqBillingFreq } = body;
 
     if (!subscriptionDbId && applyType !== "new_subscription") {
       return NextResponse.json(
@@ -222,6 +224,8 @@ export async function POST(request: NextRequest) {
       }
 
       const seatCount = newQuantity || 1;
+      const chosenTermType = reqTermType ?? "MONTHLY";
+      const chosenBillingFreq = reqBillingFreq ?? "MONTHLY";
 
       const result = await prisma.$transaction(async (tx) => {
         const customer = await tx.customer.findUnique({ where: { id: customerId } });
@@ -230,18 +234,25 @@ export async function POST(request: NextRequest) {
         const product = await tx.product.findUnique({ where: { id: productId } });
         if (!product) throw new Error("Product not found");
 
-        // Calculate dates based on ANNUAL term
+        // Calculate renewal date based on chosen term type
         const startDate = changeDateObj;
-        const renewalDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
-        const termEndDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
+        let renewalDate: Date;
+        if (chosenTermType === "THREE_YEAR") {
+          renewalDate = new Date(startDate.getFullYear() + 3, startDate.getMonth(), 1);
+        } else if (chosenTermType === "ANNUAL") {
+          renewalDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
+        } else {
+          renewalDate = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 1);
+        }
+        const termEndDate = new Date(renewalDate);
 
         // Create the subscription
         const subscription = await tx.subscription.create({
           data: {
             customerId,
             productId,
-            termType: "ANNUAL",
-            billingFrequency: "MONTHLY",
+            termType: chosenTermType,
+            billingFrequency: chosenBillingFreq,
             seatCount,
             startDate,
             renewalDate,

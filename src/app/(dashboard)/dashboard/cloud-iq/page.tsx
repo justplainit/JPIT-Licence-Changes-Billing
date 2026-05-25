@@ -59,9 +59,8 @@ export default function CloudIQPage() {
   const [loading, setLoading] = useState(false);
   const [parsed, setParsed] = useState(false);
   const [applyingIndex, setApplyingIndex] = useState<number | null>(null);
-  const [appliedResults, setAppliedResults] = useState<
-    Record<number, ApplyResult>
-  >({});
+  const [appliedResults, setAppliedResults] = useState<Record<number, ApplyResult>>({});
+  const [applyErrors, setApplyErrors] = useState<Record<number, string>>({});
 
   const handleParse = async () => {
     if (!text.trim()) {
@@ -72,6 +71,7 @@ export default function CloudIQPage() {
     setLoading(true);
     setParsed(false);
     setAppliedResults({});
+    setApplyErrors({});
     try {
       const res = await fetch("/api/cloud-iq/parse", {
         method: "POST",
@@ -125,6 +125,14 @@ export default function CloudIQPage() {
     if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription) return;
     if (!isNewSubscription && !result.match.subscriptionDbId) return;
 
+    if (isNewSubscription && (!result.match.customerId || !result.match.productId)) {
+      const msg = "Cannot create subscription: customer or product not matched in database. Please add them manually first.";
+      setApplyErrors((prev) => ({ ...prev, [index]: msg }));
+      toast.error(msg);
+      return;
+    }
+
+    setApplyErrors((prev) => { const next = { ...prev }; delete next[index]; return next; });
     setApplyingIndex(index);
     try {
       const res = await fetch("/api/cloud-iq/apply", {
@@ -147,7 +155,9 @@ export default function CloudIQPage() {
       const data = await res.json();
 
       if (!res.ok) {
-        toast.error(data.error || "Failed to apply change");
+        const msg = data.error || "Failed to apply change";
+        setApplyErrors((prev) => ({ ...prev, [index]: msg }));
+        toast.error(msg);
         return;
       }
 
@@ -156,7 +166,9 @@ export default function CloudIQPage() {
         `Change applied for ${result.match.customerName}. ${data.tasks.length} task(s) created for your accounting team.`
       );
     } catch {
-      toast.error("Failed to apply change");
+      const msg = "Network error — failed to apply change";
+      setApplyErrors((prev) => ({ ...prev, [index]: msg }));
+      toast.error(msg);
     } finally {
       setApplyingIndex(null);
     }
@@ -167,6 +179,7 @@ export default function CloudIQPage() {
     setResults([]);
     setParsed(false);
     setAppliedResults({});
+    setApplyErrors({});
   };
 
   const statusColors: Record<string, string> = {
@@ -492,6 +505,13 @@ export default function CloudIQPage() {
                     </div>
                   )}
               </div>
+
+              {/* Inline error display */}
+              {applyErrors[index] && (
+                <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {applyErrors[index]}
+                </div>
+              )}
 
               {/* Applied result: Tasks for accounting */}
               {appliedResults[index] && (

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
-import { format } from "date-fns";
+import { format, differenceInCalendarDays } from "date-fns";
 import {
   calculateProRata,
   calculateSeatReductionCredit,
@@ -966,6 +966,152 @@ export async function POST(request: NextRequest) {
           })),
           invoiceDraft: creditNoteDraft.formattedDraft,
         };
+      }
+
+      // ================================================================
+      // MONTHLY RENEWAL GRACE PERIOD
+      // Monthly NCE subscriptions get a fresh 7-day window at the start
+      // of every term. No explicit SevenDayWindow record is required —
+      // we detect it from the renewal date.
+      // ================================================================
+      if (subscription.termType === "MONTHLY") {
+        const lastRenewal = new Date(subscription.renewalDate);
+        lastRenewal.setMonth(lastRenewal.getMonth() - 1);
+        const daysSinceLastRenewal = differenceInCalendarDays(changeDateObj, lastRenewal);
+
+        if (daysSinceLastRenewal >= 0 && daysSinceLastRenewal < 7) {
+          await tx.subscription.update({
+            where: { id: subscriptionDbId },
+            data: { seatCount: newQuantity },
+          });
+
+          const creditResult = calculateSeatReductionCredit({
+            pricePerSeat,
+            seatsRemoved,
+            reductionDate: changeDateObj,
+          });
+
+          const change = await tx.subscriptionChange.create({
+            data: {
+              subscriptionId: subscriptionDbId,
+              changeType: "REMOVE_SEATS",
+              status: "APPLIED",
+              effectiveDate: changeDateObj,
+              previousSeatCount,
+              newSeatCount: newQuantity,
+              proRataAmount: -creditResult.totalCredit,
+              proRataDays: creditResult.daysRemaining,
+              proRataDailyRate: creditResult.dailyRate,
+              billingCurrency: currency,
+              notes: `Applied from Cloud-iQ notification (within 7-day monthly renewal window, day ${daysSinceLastRenewal + 1} of term). Event: ${notificationEvent}`,
+              createdById: session.user!.id!,
+            },
+          });
+
+          const creditNoteDraft = generateCreditNoteDraft({
+            customerName: subscription.customer.name,
+            productName: subscription.product.name,
+            pricePerSeat,
+            seatsRemoved,
+            reductionDate: changeDateObj,
+            currency,
+          });
+
+          await tx.invoiceDraft.create({
+            data: {
+              customerId: subscription.customerId,
+              changeId: change.id,
+              draftType: "CREDIT_NOTE",
+              invoiceDate: changeDateObj,
+              totalAmount: creditNoteDraft.totalAmount,
+              currency,
+              notes: creditNoteDraft.notes.join("\n"),
+              lineItems: {
+                create: creditNoteDraft.lineItems.map((item, index) => ({
+                  description: item.description,
+                  quantity: item.quantity,
+                  unitPrice: item.unitPrice,
+                  lineTotal: item.lineTotal,
+                  calculationBreakdown: item.calculationBreakdown,
+                  sortOrder: index,
+                })),
+              },
+            },
+          });
+
+          amendmentItems.push({
+            description: [
+              `ISSUE CREDIT NOTE to ${subscription.customer.name}`,
+              ``,
+              `Amount: ${formatCurrency(creditResult.totalCredit, currency)}`,
+              `Product: ${subscription.product.name}`,
+              `Reason: ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} removed on ${dateStr} (within 7-day monthly renewal window)`,
+              `Period: ${format(creditResult.periodStart, "d MMM")} – ${format(creditResult.periodEnd, "d MMM yyyy")}`,
+              ``,
+              `Create a credit note in Xero for the unused portion of ${monthName}.`,
+            ].join("\n"),
+            productName: subscription.product.name,
+            newMonthlyAmount: -creditResult.totalCredit,
+            newSeatCount: seatsRemoved,
+            actionByDate: changeDateObj,
+            reason: `Credit note for ${seatsRemoved} removed seat${seatsRemoved !== 1 ? "s" : ""} – ${subscription.customer.name}`,
+          });
+
+          const newMonthlyTotalAfterCredit = pricePerSeat * newQuantity;
+          amendmentItems.push({
+            description: [
+              `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
+              ``,
+              `Product: ${subscription.product.name}`,
+              `Change: ${previousSeatCount} seats → ${newQuantity} seats`,
+              `New monthly amount: ${formatCurrency(newMonthlyTotalAfterCredit, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+              `Effective from: 1 ${nextMonthName}`,
+              ``,
+              `Update the repeating invoice so that from 1 ${nextMonthName} it reflects ${newQuantity} seats.`,
+            ].join("\n"),
+            productName: subscription.product.name,
+            newMonthlyAmount: newMonthlyTotalAfterCredit,
+            newSeatCount: newQuantity,
+            actionByDate: nextMonthDate,
+            reason: `Seat decrease: ${previousSeatCount} → ${newQuantity} effective ${dateStr}`,
+          });
+
+          for (const item of amendmentItems) {
+            await tx.amendmentQueueItem.create({
+              data: { customerId: subscription.customerId, ...item },
+            });
+          }
+
+          await tx.auditLog.create({
+            data: {
+              userId: session.user!.id!,
+              action: "CLOUD_IQ_APPLY_REMOVE_SEATS",
+              entityType: "Subscription",
+              entityId: subscriptionDbId,
+              details: `Cloud-iQ: Removed ${seatsRemoved} seats within 7-day monthly renewal window (${previousSeatCount} → ${newQuantity}, day ${daysSinceLastRenewal + 1}). Credit: ${formatCurrency(creditResult.totalCredit, currency)}. Event: ${notificationEvent}`,
+              proRataAmount: -creditResult.totalCredit,
+              sevenDayWindowOpen: true,
+              xeroInstructionsGen: true,
+            },
+          });
+
+          return {
+            changeType: "REMOVE_SEATS" as const,
+            withinWindow: true,
+            customerName: subscription.customer.name,
+            productName: subscription.product.name,
+            previousSeatCount,
+            newSeatCount: newQuantity,
+            creditAmount: creditResult.totalCredit,
+            currency,
+            tasks: amendmentItems.map((a) => ({
+              description: a.description,
+              actionByDate: a.actionByDate.toISOString(),
+              reason: a.reason,
+            })),
+            invoiceDraft: creditNoteDraft.formattedDraft,
+          };
+        }
       }
 
       // Outside 7-day window: schedule for renewal

@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { applyAllOverdueScheduledChanges } from "@/lib/apply-scheduled-changes";
+import {
+  applyAllOverdueScheduledChanges,
+  rollForwardOverdueRenewalDates,
+} from "@/lib/apply-scheduled-changes";
 
 // Called daily by Vercel Cron (see vercel.json).
 // Also callable manually with the correct CRON_SECRET.
@@ -12,14 +15,15 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const { processed, errors } = await applyAllOverdueScheduledChanges();
+  const [{ processed, errors }, { updated: renewalsRolled }] = await Promise.all([
+    applyAllOverdueScheduledChanges(),
+    rollForwardOverdueRenewalDates(),
+  ]);
 
   return NextResponse.json({
-    message:
-      processed.length === 0 && errors.length === 0
-        ? "No overdue scheduled changes found"
-        : `Processed ${processed.length}, errors: ${errors.length}`,
+    message: `Scheduled changes: ${processed.length} applied, ${errors.length} errors. Renewal dates rolled forward: ${renewalsRolled.length}.`,
     processed,
+    renewalsRolled,
     ...(errors.length > 0 ? { errors } : {}),
   });
 }

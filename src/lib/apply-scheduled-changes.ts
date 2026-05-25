@@ -1,5 +1,66 @@
 import { prisma } from "@/lib/prisma";
 
+export interface RenewalRollResult {
+  subscriptionId: string;
+  customerName: string;
+  productName: string;
+  termType: string;
+  oldRenewalDate: string;
+  newRenewalDate: string;
+}
+
+/**
+ * Rolls forward renewal dates for all active subscriptions whose renewalDate
+ * is in the past. Runs daily via cron — covers monthly subs that have no
+ * scheduled changes and therefore never got their date advanced.
+ */
+export async function rollForwardOverdueRenewalDates(): Promise<{
+  updated: RenewalRollResult[];
+}> {
+  const now = new Date();
+
+  const stale = await prisma.subscription.findMany({
+    where: {
+      status: { in: ["ACTIVE", "SUSPENDED"] },
+      renewalDate: { lt: now },
+    },
+    include: { customer: true, product: true },
+  });
+
+  const updated: RenewalRollResult[] = [];
+
+  for (const sub of stale) {
+    const oldRenewalDate = new Date(sub.renewalDate);
+    let newRenewalDate = new Date(sub.renewalDate);
+
+    while (newRenewalDate <= now) {
+      if (sub.termType === "THREE_YEAR") {
+        newRenewalDate.setFullYear(newRenewalDate.getFullYear() + 3);
+      } else if (sub.termType === "ANNUAL") {
+        newRenewalDate.setFullYear(newRenewalDate.getFullYear() + 1);
+      } else {
+        newRenewalDate.setMonth(newRenewalDate.getMonth() + 1);
+      }
+    }
+
+    await prisma.subscription.update({
+      where: { id: sub.id },
+      data: { renewalDate: newRenewalDate, termEndDate: newRenewalDate },
+    });
+
+    updated.push({
+      subscriptionId: sub.id,
+      customerName: sub.customer.name,
+      productName: sub.product.name,
+      termType: sub.termType,
+      oldRenewalDate: oldRenewalDate.toISOString(),
+      newRenewalDate: newRenewalDate.toISOString(),
+    });
+  }
+
+  return { updated };
+}
+
 export interface ApplyResult {
   scheduledChangeId: string;
   customerName: string;

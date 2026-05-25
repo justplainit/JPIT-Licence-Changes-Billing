@@ -38,10 +38,43 @@ export default function RenewalsPage() {
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applySuccess, setApplySuccess] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
+  const [staleCount, setStaleCount] = useState<number | null>(null);
+  const [fixingDates, setFixingDates] = useState(false);
+  const [fixResult, setFixResult] = useState<{ fixed: number } | null>(null);
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   });
+
+  const fetchStaleCount = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/renewal-dates");
+      if (res.ok) {
+        const data = await res.json();
+        setStaleCount(data.count);
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const fixRenewalDates = async () => {
+    setFixingDates(true);
+    setFixResult(null);
+    try {
+      const res = await fetch("/api/admin/renewal-dates", { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setFixResult({ fixed: data.fixed });
+        setStaleCount(0);
+        fetchRenewals();
+      }
+    } catch {
+      // ignore
+    } finally {
+      setFixingDates(false);
+    }
+  };
 
   const fetchRenewals = useCallback(async () => {
     try {
@@ -65,7 +98,8 @@ export default function RenewalsPage() {
 
   useEffect(() => {
     fetchRenewals();
-  }, [fetchRenewals]);
+    fetchStaleCount();
+  }, [fetchRenewals, fetchStaleCount]);
 
   const applyChange = async (scheduledChangeId: string, label: string) => {
     setApplying(scheduledChangeId);
@@ -216,6 +250,37 @@ export default function RenewalsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Stale Renewal Date Banner */}
+      {staleCount !== null && staleCount > 0 && (
+        <div className="rounded-lg border-2 border-amber-400 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-amber-900">
+              {staleCount} subscription{staleCount !== 1 ? "s have" : " has"} a stale renewal date
+            </p>
+            <p className="text-xs text-amber-700 mt-0.5">
+              These dates are in the past and need to be rolled forward to enable correct grace-period detection and accurate renewal tracking.
+            </p>
+            {fixResult && (
+              <p className="text-xs text-green-700 font-medium mt-1">
+                Fixed {fixResult.fixed} subscription{fixResult.fixed !== 1 ? "s" : ""} successfully.
+              </p>
+            )}
+          </div>
+          <Button
+            onClick={fixRenewalDates}
+            disabled={fixingDates}
+            className="shrink-0 bg-amber-600 hover:bg-amber-700 text-white"
+          >
+            {fixingDates ? "Fixing…" : "Fix All Now"}
+          </Button>
+        </div>
+      )}
+      {fixResult && staleCount === 0 && (
+        <div className="rounded-lg border border-green-300 bg-green-50 px-4 py-2 text-sm text-green-800">
+          All renewal dates are now current. Fixed {fixResult.fixed} subscription{fixResult.fixed !== 1 ? "s" : ""}.
+        </div>
+      )}
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">

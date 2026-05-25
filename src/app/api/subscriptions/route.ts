@@ -23,6 +23,10 @@ export async function GET(request: NextRequest) {
       include: {
         customer: true,
         product: true,
+        scheduledChanges: {
+          where: { status: "PENDING" },
+          orderBy: { scheduledDate: "asc" },
+        },
       },
       orderBy: { createdAt: "desc" },
     });

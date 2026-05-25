@@ -34,6 +34,9 @@ type ViewMode = "list" | "calendar";
 export default function RenewalsPage() {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const [applySuccess, setApplySuccess] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [selectedMonth, setSelectedMonth] = useState(() => {
     const now = new Date();
@@ -63,6 +66,32 @@ export default function RenewalsPage() {
   useEffect(() => {
     fetchRenewals();
   }, [fetchRenewals]);
+
+  const applyChange = async (scheduledChangeId: string, label: string) => {
+    setApplying(scheduledChangeId);
+    setApplyError(null);
+    setApplySuccess(null);
+    try {
+      const res = await fetch("/api/scheduled-changes/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scheduledChangeId }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to apply change");
+      }
+      const data = await res.json();
+      setApplySuccess(
+        `Applied: ${data.customerName} — ${data.productName} reduced to ${data.newSeatCount} seats. Renewal rolled to ${new Date(data.newRenewalDate).toLocaleDateString("en-ZA")}.`
+      );
+      fetchRenewals();
+    } catch (err) {
+      setApplyError(err instanceof Error ? err.message : "Failed to apply");
+    } finally {
+      setApplying(null);
+    }
+  };
 
   const now = new Date();
 
@@ -300,11 +329,22 @@ export default function RenewalsPage() {
                   ⚠ Overdue — Action Required ({overdueScheduledChanges.length})
                 </CardTitle>
                 <CardDescription className="text-red-600">
-                  These scheduled changes are past their action date and have not been actioned.
-                  Apply in Crayon/Partner Center and update the repeating invoice in Xero immediately.
+                  These scheduled changes are past their action date. Once you have applied the
+                  reduction in Crayon/Partner Center and updated Xero, click &quot;Mark Applied&quot;
+                  to update the system.
                 </CardDescription>
               </CardHeader>
               <CardContent>
+                {applySuccess && (
+                  <div className="mb-3 rounded bg-green-50 border border-green-300 px-3 py-2 text-sm text-green-800">
+                    {applySuccess}
+                  </div>
+                )}
+                {applyError && (
+                  <div className="mb-3 rounded bg-red-100 border border-red-300 px-3 py-2 text-sm text-red-800">
+                    {applyError}
+                  </div>
+                )}
                 <div className="space-y-3">
                   {overdueScheduledChanges.map((sub) =>
                     sub.scheduledChanges
@@ -318,8 +358,8 @@ export default function RenewalsPage() {
                           key={sc.id}
                           className="border border-red-300 rounded-lg p-4 bg-red-50"
                         >
-                          <div className="flex items-start justify-between">
-                            <div>
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1 min-w-0">
                               <p className="font-medium text-gray-900">
                                 {sub.customer.name} — {sub.product.name}
                               </p>
@@ -333,15 +373,29 @@ export default function RenewalsPage() {
                                 {new Date(sc.scheduledDate).toLocaleDateString("en-ZA")}
                               </p>
                             </div>
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-200 text-red-800">
-                              Overdue
-                            </span>
+                            <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-200 text-red-800">
+                                Overdue
+                              </span>
+                              <Button
+                                size="sm"
+                                disabled={applying === sc.id}
+                                onClick={() =>
+                                  applyChange(
+                                    sc.id,
+                                    `${sub.customer.name} – ${sub.product.name}`
+                                  )
+                                }
+                              >
+                                {applying === sc.id ? "Applying…" : "Mark Applied"}
+                              </Button>
+                            </div>
                           </div>
                           <div className="mt-3 text-xs text-gray-600 bg-white rounded p-2 border border-red-200">
-                            <strong>Action required:</strong> Apply the change in Crayon/Partner Center,
-                            then update the repeating invoice in Xero. Current seat count in system:{" "}
-                            <strong>{sub.seatCount}</strong> → should be{" "}
-                            <strong>{sc.targetSeatCount}</strong>.
+                            <strong>Steps:</strong> (1) Reduce to {sc.targetSeatCount} seats in
+                            Crayon/Partner Center · (2) Update the repeating invoice in Xero ·
+                            (3) Click <em>Mark Applied</em> — the system will update the seat count
+                            and roll the renewal date forward automatically.
                           </div>
                         </div>
                       ))

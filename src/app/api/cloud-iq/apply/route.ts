@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
     const body: ApplyRequest = await request.json();
     const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
 
-    if (!subscriptionDbId) {
+    if (!subscriptionDbId && applyType !== "new_subscription") {
       return NextResponse.json(
         { error: "subscriptionDbId is required" },
         { status: 400 }

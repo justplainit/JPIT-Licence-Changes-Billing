@@ -78,6 +78,7 @@ export async function PUT(
       termEndDate,
       microsoftSubId,
       notes,
+      termType,
       billingFrequency,
     } = body;
 
@@ -91,6 +92,7 @@ export async function PUT(
         ...(termEndDate !== undefined && { termEndDate: new Date(termEndDate) }),
         ...(microsoftSubId !== undefined && { microsoftSubId }),
         ...(notes !== undefined && { notes }),
+        ...(termType !== undefined && { termType }),
         ...(billingFrequency !== undefined && { billingFrequency }),
       },
       include: {

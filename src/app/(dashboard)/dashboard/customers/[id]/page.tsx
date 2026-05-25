@@ -119,6 +119,17 @@ export default function CustomerDetailPage() {
     fetchCustomer();
   }, [fetchCustomer]);
 
+  const suggestRenewalDate = (type: string): string => {
+    const now = new Date();
+    if (type === "MONTHLY") {
+      return new Date(now.getFullYear(), now.getMonth() + 1, 1).toISOString().split("T")[0];
+    } else if (type === "ANNUAL") {
+      return new Date(now.getFullYear() + 1, now.getMonth(), 1).toISOString().split("T")[0];
+    } else {
+      return new Date(now.getFullYear() + 3, now.getMonth(), 1).toISOString().split("T")[0];
+    }
+  };
+
   const startEditing = (sub: Subscription) => {
     setEditingSubId(sub.id);
     setEditValues({
@@ -127,6 +138,9 @@ export default function CustomerDetailPage() {
       autoRenew: String(sub.autoRenew),
       microsoftSubId: sub.microsoftSubId || "",
       notes: sub.notes || "",
+      termType: sub.termType,
+      billingFrequency: sub.billingFrequency,
+      renewalDate: new Date(sub.renewalDate).toISOString().split("T")[0],
     });
     setSuccessMsg(null);
   };
@@ -154,6 +168,10 @@ export default function CustomerDetailPage() {
           autoRenew: editValues.autoRenew === "true",
           microsoftSubId: editValues.microsoftSubId || null,
           notes: editValues.notes || null,
+          termType: editValues.termType,
+          billingFrequency: editValues.billingFrequency,
+          renewalDate: editValues.renewalDate,
+          termEndDate: editValues.renewalDate,
         }),
       });
 
@@ -603,6 +621,64 @@ export default function CustomerDetailPage() {
                             }
                             placeholder="Optional"
                           />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            Term Type
+                          </label>
+                          <select
+                            value={editValues.termType}
+                            onChange={(e) => {
+                              const newTerm = e.target.value;
+                              setEditValues((prev) => ({
+                                ...prev,
+                                termType: newTerm,
+                                renewalDate: suggestRenewalDate(newTerm),
+                              }));
+                            }}
+                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                          >
+                            <option value="MONTHLY">Monthly (M2M)</option>
+                            <option value="ANNUAL">Annual</option>
+                            <option value="THREE_YEAR">3-Year</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            Billing Frequency
+                          </label>
+                          <select
+                            value={editValues.billingFrequency}
+                            onChange={(e) =>
+                              setEditValues((prev) => ({
+                                ...prev,
+                                billingFrequency: e.target.value,
+                              }))
+                            }
+                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                          >
+                            <option value="MONTHLY">Monthly</option>
+                            <option value="ANNUAL">Annual</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            Renewal Date
+                          </label>
+                          <Input
+                            type="date"
+                            value={editValues.renewalDate}
+                            onChange={(e) =>
+                              setEditValues((prev) => ({
+                                ...prev,
+                                renewalDate: e.target.value,
+                              }))
+                            }
+                          />
+                          <p className="text-[10px] text-slate-400 mt-0.5">Auto-updates when term changes</p>
                         </div>
                       </div>
                       <div>

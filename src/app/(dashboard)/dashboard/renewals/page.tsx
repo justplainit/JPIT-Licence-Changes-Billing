@@ -38,6 +38,7 @@ export default function RenewalsPage() {
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applySuccess, setApplySuccess] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("list");
+  const [termTypeFilter, setTermTypeFilter] = useState<"ALL" | "MONTHLY" | "ANNUAL" | "THREE_YEAR">("ALL");
   const [staleCount, setStaleCount] = useState<number | null>(null);
   const [fixingDates, setFixingDates] = useState(false);
   const [fixResult, setFixResult] = useState<{ fixed: number } | null>(null);
@@ -199,6 +200,16 @@ export default function RenewalsPage() {
     return days;
   };
 
+  const termTypeCounts = {
+    MONTHLY: subscriptions.filter((s) => s.termType === "MONTHLY").length,
+    ANNUAL: subscriptions.filter((s) => s.termType === "ANNUAL").length,
+    THREE_YEAR: subscriptions.filter((s) => s.termType === "THREE_YEAR").length,
+  };
+
+  const termTypeFiltered = termTypeFilter !== "ALL"
+    ? subscriptions.filter((s) => s.termType === termTypeFilter)
+    : [];
+
   const upcomingRenewals = subscriptions.filter(
     (s) => getDaysUntilRenewal(s.renewalDate) <= 60 && getDaysUntilRenewal(s.renewalDate) > 0
   );
@@ -279,6 +290,104 @@ export default function RenewalsPage() {
       {fixResult && staleCount === 0 && (
         <div className="rounded-lg border border-green-300 bg-green-50 px-4 py-2 text-sm text-green-800">
           All renewal dates are now current. Fixed {fixResult.fixed} subscription{fixResult.fixed !== 1 ? "s" : ""}.
+        </div>
+      )}
+
+      {/* Term Type Filter */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-medium text-slate-500 mr-1">Filter by term:</span>
+        {(["ALL", "MONTHLY", "ANNUAL", "THREE_YEAR"] as const).map((t) => {
+          const count = t === "ALL" ? subscriptions.length : termTypeCounts[t];
+          const label = t === "ALL" ? "All" : t === "THREE_YEAR" ? "3-Year" : t === "ANNUAL" ? "Annual" : "Monthly";
+          const active = termTypeFilter === t;
+          const highlight = t === "ANNUAL" && termTypeCounts.ANNUAL > 0;
+          return (
+            <button
+              key={t}
+              onClick={() => setTermTypeFilter(t)}
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                active
+                  ? t === "ANNUAL"
+                    ? "bg-amber-600 text-white"
+                    : "bg-slate-800 text-white"
+                  : highlight
+                    ? "bg-amber-100 text-amber-800 hover:bg-amber-200"
+                    : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+              }`}
+            >
+              {label}
+              <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
+                active ? "bg-white/25 text-white" : "bg-white text-slate-600"
+              }`}>
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Term Type Report — shown when a specific term type is selected */}
+      {termTypeFilter !== "ALL" && (
+        <div className="rounded-lg border border-slate-200 overflow-hidden">
+          <div className="flex items-center justify-between bg-slate-50 px-4 py-3 border-b border-slate-200">
+            <div>
+              <h2 className="text-sm font-semibold text-slate-900">
+                {termTypeFilter === "THREE_YEAR" ? "3-Year" : termTypeFilter === "ANNUAL" ? "Annual" : "Monthly (M2M)"} subscriptions — {termTypeFiltered.length} total
+              </h2>
+              {termTypeFilter === "ANNUAL" && (
+                <p className="text-xs text-amber-700 mt-0.5">
+                  Review these — most subscriptions should be Monthly. Click Edit on the customer page to correct any that were set to Annual by mistake.
+                </p>
+              )}
+            </div>
+            <button
+              onClick={() => setTermTypeFilter("ALL")}
+              className="text-xs text-slate-500 hover:text-slate-700 underline"
+            >
+              Clear filter
+            </button>
+          </div>
+          {termTypeFiltered.length === 0 ? (
+            <p className="text-sm text-slate-500 p-4">No subscriptions with this term type.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Product</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Seats</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Billing Freq</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Renewal Date</th>
+                    <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Time Left</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {termTypeFiltered.map((sub) => {
+                    const daysUntil = getDaysUntilRenewal(sub.renewalDate);
+                    return (
+                      <tr key={sub.id} className="hover:bg-slate-50">
+                        <td className="px-4 py-2.5 text-sm font-medium text-slate-900">
+                          <a href={`/dashboard/customers/${sub.customer.id}`} className="hover:underline text-blue-600">
+                            {sub.customer.name}
+                          </a>
+                        </td>
+                        <td className="px-4 py-2.5 text-sm text-slate-600">{sub.product.name}</td>
+                        <td className="px-4 py-2.5 text-sm text-slate-600">{sub.seatCount}</td>
+                        <td className="px-4 py-2.5 text-sm text-slate-500">{sub.billingFrequency}</td>
+                        <td className="px-4 py-2.5 text-sm text-slate-600">
+                          {new Date(sub.renewalDate).toLocaleDateString("en-ZA")}
+                        </td>
+                        <td className="px-4 py-2.5 text-sm">
+                          {getRenewalBadge(daysUntil)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

@@ -7,6 +7,7 @@ import {
   calculateSeatReductionCredit,
   calculate7DayWindow,
   formatCurrency,
+  getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
 import {
   generateProRataInvoiceDraft,
@@ -960,13 +961,21 @@ export async function POST(request: NextRequest) {
         };
       }
 
-      // Outside 7-day window: schedule for renewal
+      // Outside 7-day window: schedule for renewal.
+      // The subscription's stored renewalDate may be a past anniversary, so roll
+      // it forward to the next renewal on or after the change date.
+      const upcomingRenewalDate = getUpcomingRenewalDate(
+        subscription.renewalDate,
+        subscription.termType,
+        changeDateObj
+      );
+
       const change = await tx.subscriptionChange.create({
         data: {
           subscriptionId: subscriptionDbId,
           changeType: "REMOVE_SEATS",
           status: "SCHEDULED",
-          effectiveDate: subscription.renewalDate,
+          effectiveDate: upcomingRenewalDate,
           previousSeatCount,
           newSeatCount: newQuantity,
           billingCurrency: currency,
@@ -979,13 +988,13 @@ export async function POST(request: NextRequest) {
         data: {
           subscriptionId: subscriptionDbId,
           changeType: "REMOVE_SEATS",
-          scheduledDate: subscription.renewalDate,
+          scheduledDate: upcomingRenewalDate,
           targetSeatCount: newQuantity,
           notes: `Cloud-iQ: Reduce seats from ${previousSeatCount} to ${newQuantity} at renewal`,
         },
       });
 
-      const renewalDateStr = format(subscription.renewalDate, "d MMMM yyyy");
+      const renewalDateStr = format(upcomingRenewalDate, "d MMMM yyyy");
 
       // Task: Reduce at renewal
       amendmentItems.push({
@@ -1007,7 +1016,7 @@ export async function POST(request: NextRequest) {
         productName: subscription.product.name,
         newMonthlyAmount: pricePerSeat * newQuantity,
         newSeatCount: newQuantity,
-        actionByDate: subscription.renewalDate,
+        actionByDate: upcomingRenewalDate,
         reason: `Scheduled seat decrease at renewal: ${previousSeatCount} → ${newQuantity}`,
       });
 

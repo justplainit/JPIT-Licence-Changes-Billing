@@ -328,3 +328,36 @@ export function getNextRenewalDate(
       return new Date(year + 3, month, 1);
   }
 }
+
+/**
+ * Get the next renewal date that falls on or after a reference date.
+ *
+ * A subscription's stored renewalDate can be in the past (e.g. a previous
+ * anniversary that has already elapsed). When scheduling a change "at renewal",
+ * we must roll the stored anniversary forward by the term interval until it is
+ * on or after the reference date (typically the change/notification date), so
+ * the change lands on the upcoming renewal rather than a past one.
+ */
+export function getUpcomingRenewalDate(
+  renewalDate: Date,
+  termType: "MONTHLY" | "ANNUAL" | "THREE_YEAR",
+  referenceDate: Date
+): Date {
+  const stepMonths = termType === "MONTHLY" ? 1 : termType === "THREE_YEAR" ? 36 : 12;
+
+  const next = new Date(
+    renewalDate.getFullYear(),
+    renewalDate.getMonth(),
+    renewalDate.getDate()
+  );
+
+  // Advance by the term interval until on or after the reference date.
+  // Guard against pathological loops with a generous upper bound.
+  let iterations = 0;
+  while (next < referenceDate && iterations < 1200) {
+    next.setMonth(next.getMonth() + stepMonths);
+    iterations += 1;
+  }
+
+  return next;
+}

@@ -701,16 +701,40 @@ export async function POST(request: NextRequest) {
         ? subscription.sevenDayWindows[0]
         : null;
 
-      if (openWindow) {
-        // ----- Check if this is a FULL REVERSAL (grace period cancellation) -----
-        // Look up the original change that created this 7-day window to find the
-        // seat count BEFORE the addition.
-        const originalChange = openWindow.changeId
-          ? await tx.subscriptionChange.findUnique({ where: { id: openWindow.changeId } })
-          : null;
-        const priorSeatCount = originalChange?.previousSeatCount ?? null;
-        const isFullReversal = priorSeatCount !== null && newQuantity <= priorSeatCount;
+      // ----- Identify a recent seat addition this decrease may be reversing -----
+      // Prefer the change linked to an open 7-day window. If none is on record
+      // (e.g. only the decrease notification was processed, so the addition's
+      // window was never created), fall back to the most recent APPLIED
+      // ADD_SEATS change within the 7-day grace period, so a same-day /
+      // within-window reversal is still recognised.
+      let originalChange = openWindow?.changeId
+        ? await tx.subscriptionChange.findUnique({ where: { id: openWindow.changeId } })
+        : null;
 
+      if (!originalChange) {
+        const graceCutoff = new Date(changeDateObj);
+        graceCutoff.setDate(graceCutoff.getDate() - 7);
+        originalChange = await tx.subscriptionChange.findFirst({
+          where: {
+            subscriptionId: subscriptionDbId,
+            changeType: "ADD_SEATS",
+            status: "APPLIED",
+            effectiveDate: { gte: graceCutoff, lte: changeDateObj },
+          },
+          orderBy: { effectiveDate: "desc" },
+        });
+      }
+
+      const priorSeatCount = originalChange?.previousSeatCount ?? null;
+      // Full reversal = seats returned to the pre-addition level within the
+      // grace period. With an open window we keep the existing <= test; via the
+      // fallback (no window) we require an exact return so a genuinely deeper
+      // reduction isn't misread as a reversal.
+      const isFullReversal =
+        priorSeatCount !== null &&
+        (openWindow ? newQuantity <= priorSeatCount : newQuantity === priorSeatCount);
+
+      if (openWindow || isFullReversal) {
         if (isFullReversal) {
           // ================================================================
           // GRACE PERIOD FULL REVERSAL — no billing action needed
@@ -738,11 +762,13 @@ export async function POST(request: NextRequest) {
             },
           });
 
-          // Close the 7-day window
-          await tx.sevenDayWindow.update({
-            where: { id: openWindow.id },
-            data: { isClosed: true },
-          });
+          // Close the 7-day window (if one was open)
+          if (openWindow) {
+            await tx.sevenDayWindow.update({
+              where: { id: openWindow.id },
+              data: { isClosed: true },
+            });
+          }
 
           // Cancel all pending (non-completed) amendment queue items for this
           // customer + product that were created by the original addition
@@ -765,28 +791,45 @@ export async function POST(request: NextRequest) {
             });
           }
 
-          // Create a single "no action" amendment so the admin knows what happened
+          // Surface the original one-time pro-rata charge so the accounting
+          // team can act correctly depending on whether it was already sent.
+          const addDateStr = originalChange
+            ? format(originalChange.effectiveDate, "d MMMM yyyy")
+            : "recently";
+          const originalProRata = originalChange?.proRataAmount ?? null;
+          const proRataStr =
+            originalProRata !== null ? formatCurrency(originalProRata, currency) : null;
+          const seatsReversed = previousSeatCount - priorSeatCount;
+          const seatWord = seatsReversed !== 1 ? "seats" : "seat";
+
+          // Create a clear either/or amendment so the admin knows what happened
+          // and whether a credit note is required.
           await tx.amendmentQueueItem.create({
             data: {
               customerId: subscription.customerId,
               description: [
-                `NO BILLING ACTION REQUIRED — Grace period reversal for ${subscription.customer.name}`,
+                `GRACE PERIOD REVERSAL — check pro-rata invoice for ${subscription.customer.name}`,
                 ``,
                 `Product: ${subscription.product.name}`,
                 `What happened:`,
-                `  • Seat increase: ${priorSeatCount} → ${previousSeatCount} on ${originalChange ? format(originalChange.effectiveDate, "d MMMM yyyy") : "recently"}`,
-                `  • Seat decrease: ${previousSeatCount} → ${priorSeatCount} on ${dateStr} (within 7-day grace period)`,
+                `  • Seat increase: ${priorSeatCount} → ${previousSeatCount} on ${addDateStr}`,
+                `  • Seat decrease (reversal): ${previousSeatCount} → ${priorSeatCount} on ${dateStr} (within 7-day grace period)`,
                 ``,
-                `Result: Seats are back to ${priorSeatCount}. No pro-rata invoice or credit note needed.`,
-                `The previous amendment tasks for this change have been automatically cancelled.`,
+                `A one-time pro-rata invoice${proRataStr ? ` of ${proRataStr}` : ""} was raised for the ${seatsReversed} added ${seatWord}.`,
+                `Because the ${seatWord} ${seatsReversed !== 1 ? "were" : "was"} reversed within the 7-day window, the customer should pay nothing extra. What to do depends on whether that invoice was already sent:`,
                 ``,
-                `No changes needed to the repeating invoice in Xero.`,
+                `  • IF the pro-rata invoice${proRataStr ? ` of ${proRataStr}` : ""} was ALREADY SENT to the customer →`,
+                `      issue a CREDIT NOTE${proRataStr ? ` for ${proRataStr}` : " for the same amount"} in Xero to cancel it out.`,
+                `  • IF it was NOT sent yet →`,
+                `      no action needed. The pending pro-rata invoice task has been cancelled automatically.`,
+                ``,
+                `Net effect to the customer: nothing extra. No change to the repeating invoice in Xero.`,
               ].join("\n"),
               productName: subscription.product.name,
               newMonthlyAmount: pricePerSeat * priorSeatCount,
               newSeatCount: priorSeatCount,
               actionByDate: changeDateObj,
-              reason: `Grace period reversal: ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount} – ${subscription.customer.name}`,
+              reason: `Grace period reversal — verify credit note: ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount} – ${subscription.customer.name}`,
             },
           });
 
@@ -796,7 +839,7 @@ export async function POST(request: NextRequest) {
               action: "CLOUD_IQ_APPLY_GRACE_PERIOD_REVERSAL",
               entityType: "Subscription",
               entityId: subscriptionDbId,
-              details: `Cloud-iQ: Grace period full reversal – ${subscription.product.name} seats ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount}. No billing impact. Event: ${notificationEvent}`,
+              details: `Cloud-iQ: Grace period full reversal – ${subscription.product.name} seats ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount}. Net effect nil; credit note required only if the pro-rata invoice${proRataStr ? ` of ${proRataStr}` : ""} was already sent. Event: ${notificationEvent}`,
               proRataAmount: 0,
               sevenDayWindowOpen: false,
               xeroInstructionsGen: true,
@@ -814,11 +857,11 @@ export async function POST(request: NextRequest) {
             creditAmount: 0,
             currency,
             tasks: [{
-              description: `NO BILLING ACTION REQUIRED — Grace period reversal. Seats returned to ${priorSeatCount}. Previous amendment tasks have been automatically cancelled.`,
+              description: `GRACE PERIOD REVERSAL — check pro-rata invoice. Seats returned to ${priorSeatCount}. If the one-time pro-rata invoice${proRataStr ? ` of ${proRataStr}` : ""} was already sent, issue a credit note for that amount; if not, the pending invoice task has been cancelled.`,
               actionByDate: changeDateObj.toISOString(),
               reason: `Grace period reversal: ${priorSeatCount} → ${previousSeatCount} → ${priorSeatCount}`,
             }],
-            message: `Grace period reversal detected. The seat addition has been fully reversed within the 7-day window. No billing changes are needed — previous amendment tasks have been automatically cancelled.`,
+            message: `Grace period reversal detected — the seat addition was reversed within the 7-day window, so the customer should pay nothing extra. If the one-time pro-rata invoice${proRataStr ? ` of ${proRataStr}` : ""} was already sent, issue a credit note for that amount; otherwise the pending pro-rata invoice task has been cancelled automatically.`,
           };
         }
 

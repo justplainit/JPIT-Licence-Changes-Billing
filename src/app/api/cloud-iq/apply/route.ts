@@ -7,6 +7,7 @@ import {
   calculateSeatReductionCredit,
   calculate7DayWindow,
   formatCurrency,
+  getNextRenewalDate,
   getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
 import {
@@ -231,10 +232,11 @@ export async function POST(request: NextRequest) {
         const product = await tx.product.findUnique({ where: { id: productId } });
         if (!product) throw new Error("Product not found");
 
-        // Calculate dates based on ANNUAL term
+        // Calculate dates based on ANNUAL term.
+        // Renewal is the anniversary of the start date (NCE model).
         const startDate = changeDateObj;
-        const renewalDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
-        const termEndDate = new Date(startDate.getFullYear() + 1, startDate.getMonth(), 1);
+        const renewalDate = getNextRenewalDate(startDate, "ANNUAL");
+        const termEndDate = renewalDate;
 
         // Create the subscription
         const subscription = await tx.subscription.create({

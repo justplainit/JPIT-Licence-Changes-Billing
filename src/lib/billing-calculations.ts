@@ -306,27 +306,40 @@ export function getNextBillingDate(fromDate: Date): Date {
   return new Date(year, month + 1, 26);
 }
 
+/** Number of months in one term interval. */
+function termMonths(termType: "MONTHLY" | "ANNUAL" | "THREE_YEAR"): number {
+  return termType === "MONTHLY" ? 1 : termType === "THREE_YEAR" ? 36 : 12;
+}
+
 /**
- * Get renewal date (1st of anniversary month).
- * For ANNUAL: 1 year from start.
- * For THREE_YEAR: 3 years from start.
- * For MONTHLY: 1st of next month.
+ * Add whole months to a date, preserving the day-of-month and clamping to the
+ * last day of the target month when the day doesn't exist there (e.g. adding a
+ * month to 31 Jan lands on 28/29 Feb). The result is normalised to local
+ * midnight so renewal dates stay time-component free.
+ */
+function addMonthsClamped(date: Date, months: number): Date {
+  const target = new Date(date.getFullYear(), date.getMonth() + months, 1);
+  const daysInTargetMonth = new Date(
+    target.getFullYear(),
+    target.getMonth() + 1,
+    0
+  ).getDate();
+  target.setDate(Math.min(date.getDate(), daysInTargetMonth));
+  return target;
+}
+
+/**
+ * Get the renewal date: the anniversary of the start date, one term ahead.
+ *
+ * This mirrors Microsoft NCE, where a subscription renews on the anniversary of
+ * its commitment start date (the actual day), not the 1st of the month.
+ * For ANNUAL: 1 year from start. For THREE_YEAR: 3 years. For MONTHLY: 1 month.
  */
 export function getNextRenewalDate(
   startDate: Date,
   termType: "MONTHLY" | "ANNUAL" | "THREE_YEAR"
 ): Date {
-  const year = startDate.getFullYear();
-  const month = startDate.getMonth();
-
-  switch (termType) {
-    case "MONTHLY":
-      return new Date(year, month + 1, 1);
-    case "ANNUAL":
-      return new Date(year + 1, month, 1);
-    case "THREE_YEAR":
-      return new Date(year + 3, month, 1);
-  }
+  return addMonthsClamped(startDate, termMonths(termType));
 }
 
 /**
@@ -336,28 +349,27 @@ export function getNextRenewalDate(
  * anniversary that has already elapsed). When scheduling a change "at renewal",
  * we must roll the stored anniversary forward by the term interval until it is
  * on or after the reference date (typically the change/notification date), so
- * the change lands on the upcoming renewal rather than a past one.
+ * the change lands on the upcoming renewal rather than a past one. The
+ * anniversary day-of-month is preserved (candidates are always computed from the
+ * original anchor, so no drift accumulates).
  */
 export function getUpcomingRenewalDate(
   renewalDate: Date,
   termType: "MONTHLY" | "ANNUAL" | "THREE_YEAR",
   referenceDate: Date
 ): Date {
-  const stepMonths = termType === "MONTHLY" ? 1 : termType === "THREE_YEAR" ? 36 : 12;
+  const step = termMonths(termType);
 
-  const next = new Date(
-    renewalDate.getFullYear(),
-    renewalDate.getMonth(),
-    renewalDate.getDate()
-  );
+  // Normalise the anchor to local midnight, preserving its day-of-month.
+  let candidate = addMonthsClamped(renewalDate, 0);
 
-  // Advance by the term interval until on or after the reference date.
-  // Guard against pathological loops with a generous upper bound.
-  let iterations = 0;
-  while (next < referenceDate && iterations < 1200) {
-    next.setMonth(next.getMonth() + stepMonths);
-    iterations += 1;
+  // Advance in whole-term multiples from the anchor until on or after the
+  // reference date. Guard against pathological loops with a generous bound.
+  let k = 0;
+  while (candidate < referenceDate && k < 1200) {
+    k += 1;
+    candidate = addMonthsClamped(renewalDate, step * k);
   }
 
-  return next;
+  return candidate;
 }

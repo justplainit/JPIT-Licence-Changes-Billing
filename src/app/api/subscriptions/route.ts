@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
 import { SubscriptionStatus, TermType } from "@/generated/prisma";
-import { calculate7DayWindow } from "@/lib/billing-calculations";
+import { calculate7DayWindow, getNextRenewalDate } from "@/lib/billing-calculations";
 
 export async function GET(request: NextRequest) {
   try {
@@ -64,29 +64,17 @@ export async function POST(request: NextRequest) {
 
     const start = new Date(startDate);
 
-    // Calculate renewalDate and termEndDate based on termType
-    let renewalDate: Date;
-    let termEndDate: Date;
-
-    switch (termType as TermType) {
-      case "MONTHLY":
-        renewalDate = new Date(start.getFullYear(), start.getMonth() + 1, 1);
-        termEndDate = new Date(start.getFullYear(), start.getMonth() + 1, 1);
-        break;
-      case "ANNUAL":
-        renewalDate = new Date(start.getFullYear() + 1, start.getMonth(), 1);
-        termEndDate = new Date(start.getFullYear() + 1, start.getMonth(), 1);
-        break;
-      case "THREE_YEAR":
-        renewalDate = new Date(start.getFullYear() + 3, start.getMonth(), 1);
-        termEndDate = new Date(start.getFullYear() + 3, start.getMonth(), 1);
-        break;
-      default:
-        return NextResponse.json(
-          { error: "Invalid termType. Must be MONTHLY, ANNUAL, or THREE_YEAR" },
-          { status: 400 }
-        );
+    // Calculate renewalDate and termEndDate based on termType.
+    // Renewal is the anniversary of the start date, one term ahead (NCE model).
+    if (!["MONTHLY", "ANNUAL", "THREE_YEAR"].includes(termType)) {
+      return NextResponse.json(
+        { error: "Invalid termType. Must be MONTHLY, ANNUAL, or THREE_YEAR" },
+        { status: 400 }
+      );
     }
+
+    const renewalDate = getNextRenewalDate(start, termType as TermType);
+    const termEndDate = renewalDate;
 
     const { opensAt, closesAt } = calculate7DayWindow(start);
 

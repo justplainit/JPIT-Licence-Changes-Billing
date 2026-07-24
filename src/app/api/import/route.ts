@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
 import { TermType } from "@/generated/prisma";
+import { getNextRenewalDate } from "@/lib/billing-calculations";
 
 interface ImportRow {
   customerName: string;
@@ -241,19 +242,10 @@ export async function POST(request: NextRequest) {
                   startDate = new Date(renewalDate.getFullYear() - 1, renewalDate.getMonth(), renewalDate.getDate());
               }
             } else {
-              switch (termType) {
-                case "MONTHLY":
-                  renewalDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-                  termEndDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-                  break;
-                case "THREE_YEAR":
-                  renewalDate = new Date(now.getFullYear() + 3, now.getMonth(), 1);
-                  termEndDate = new Date(now.getFullYear() + 3, now.getMonth(), 1);
-                  break;
-                default: // ANNUAL
-                  renewalDate = new Date(now.getFullYear() + 1, now.getMonth(), 1);
-                  termEndDate = new Date(now.getFullYear() + 1, now.getMonth(), 1);
-              }
+              // No Crayon renewal date provided: derive from the start date
+              // (now) as the anniversary one term ahead (NCE model).
+              renewalDate = getNextRenewalDate(now, termType);
+              termEndDate = renewalDate;
             }
 
             await tx.subscription.create({

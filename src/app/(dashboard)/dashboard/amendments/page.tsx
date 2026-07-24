@@ -124,11 +124,14 @@ export default function AmendmentsPage() {
                 <div className={`flex items-center justify-between px-4 py-2 ${
                   item.isCompleted ? "bg-gray-100" : isOverdue(item.actionByDate) ? "bg-red-100" : "bg-slate-100"
                 }`}>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0">
                     <span className={`${taskColor} text-white text-xs font-bold px-2 py-0.5 rounded`}>
                       {taskType}
                     </span>
                     <span className="font-semibold text-slate-900">{item.customer.name}</span>
+                    <span className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs font-semibold text-slate-700">
+                      {item.productName}
+                    </span>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className={`text-xs font-medium ${isOverdue(item.actionByDate) && !item.isCompleted ? "text-red-700 font-bold" : "text-slate-500"}`}>
@@ -187,9 +190,6 @@ export default function AmendmentsPage() {
                   {/* Product & Amount summary for non-pro-rata items */}
                   {item.proRataFraction == null && (
                     <div className="mb-3 flex flex-wrap gap-3 text-sm">
-                      <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">
-                        <span className="text-slate-500">Product:</span> {item.productName}
-                      </span>
                       <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">
                         <span className="text-slate-500">Seats:</span> {item.newSeatCount}
                       </span>

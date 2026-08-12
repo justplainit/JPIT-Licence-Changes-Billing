@@ -5,7 +5,6 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // ============================================================
@@ -338,6 +337,10 @@ model AmendmentQueueItem {
   reason              String
   isCompleted         Boolean         @default(false)
   completedAt         DateTime?
+  proRataFraction     Float?
+  proRataDays         Int?
+  proRataDaysInMonth  Int?
+  proRataAmount       Float?
   isScheduledChange   Boolean         @default(false)
   scheduledChangeId   String?
   createdAt           DateTime        @default(now())

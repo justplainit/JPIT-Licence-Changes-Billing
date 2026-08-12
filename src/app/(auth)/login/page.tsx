@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { signIn } from "next-auth/react";
+import { signIn, type SignInResponse } from "next-auth/react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -25,15 +25,20 @@ export default function LoginPage() {
     setIsLoading(true);
 
     try {
-      const result = await signIn("credentials", {
-        email,
-        password,
-        redirect: true,
-        callbackUrl: "/dashboard",
-      });
+      const result: SignInResponse | undefined = await signIn(
+        "credentials",
+        {
+          email,
+          password,
+          redirect: false,
+          redirectTo: "/dashboard",
+        }
+      );
 
       if (result?.error) {
         setError("Invalid email or password.");
+      } else if (result?.url) {
+        window.location.href = result.url;
       }
     } catch {
       setError("An unexpected error occurred. Please try again.");

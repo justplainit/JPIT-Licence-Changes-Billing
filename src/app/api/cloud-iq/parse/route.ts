@@ -15,18 +15,23 @@ function parseStateChangeEvent(event: string): {
   isCancellation: boolean;
   isSuspension: boolean;
   isReactivation: boolean;
+  isActivation: boolean;
 } {
   // Match patterns like "State changed from Active to Expired"
   const match = event.match(/state\s+changed\s+from\s+(\w+)\s+to\s+(\w+)/i);
   if (!match) {
-    return { isStateChange: false, fromState: "", toState: "", isCancellation: false, isSuspension: false, isReactivation: false };
+    return { isStateChange: false, fromState: "", toState: "", isCancellation: false, isSuspension: false, isReactivation: false, isActivation: false };
   }
   const fromState = match[1].toLowerCase();
   const toState = match[2].toLowerCase();
   const isCancellation = EXPIRED_STATES.includes(toState);
   const isSuspension = SUSPENDED_STATES.includes(toState);
   const isReactivation = ACTIVE_STATES.includes(toState) && (EXPIRED_STATES.includes(fromState) || SUSPENDED_STATES.includes(fromState));
-  return { isStateChange: true, fromState, toState, isCancellation, isSuspension, isReactivation };
+  // A new subscription going live (e.g. "Pending → Active") is an activation,
+  // not a reactivation of a previously expired/suspended subscription. Partner
+  // Center / Crayon sends this when a brand-new subscription is provisioned.
+  const isActivation = ACTIVE_STATES.includes(toState) && !isReactivation;
+  return { isStateChange: true, fromState, toState, isCancellation, isSuspension, isReactivation, isActivation };
 }
 
 export interface ParsedNotificationResult {
@@ -212,9 +217,15 @@ export async function POST(request: NextRequest) {
 
         const hasAnyMatch = customer || product;
 
-        // Check if this is a "New subscription was created" event with both customer and product found
+        // Check if this is a new-subscription event with both customer and product found.
+        // Two shapes signal a brand-new subscription that needs to be created:
+        //   1. An explicit "New subscription was created" event.
+        //   2. An activation state change (e.g. "State changed from Pending to Active"),
+        //      which Partner Center / Crayon sends when a newly provisioned
+        //      subscription goes live and is not yet in our system.
         const isNewSubscriptionEvent = /new subscription.*was created/i.test(notification.event);
-        const isNewSub = isNewSubscriptionEvent && customer && product;
+        const isActivationEvent = stateChange.isStateChange && stateChange.isActivation;
+        const isNewSub = (isNewSubscriptionEvent || isActivationEvent) && customer && product;
 
         results.push({
           notification,

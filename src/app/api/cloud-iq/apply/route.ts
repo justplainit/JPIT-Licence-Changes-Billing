@@ -36,7 +36,10 @@ export async function POST(request: NextRequest) {
     const body: ApplyRequest = await request.json();
     const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
 
-    if (!subscriptionDbId) {
+    // New subscriptions don't exist in the DB yet, so they have no
+    // subscriptionDbId — the record is created below from customerId/productId.
+    // Every other apply type acts on an existing subscription and requires it.
+    if (applyType !== "new_subscription" && !subscriptionDbId) {
       return NextResponse.json(
         { error: "subscriptionDbId is required" },
         { status: 400 }

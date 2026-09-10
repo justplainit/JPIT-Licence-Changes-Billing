@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { DashboardNav } from "@/components/dashboard-nav";
+import { Toaster } from "@/components/ui/sonner";
 
 export default async function DashboardLayout({
   children,
@@ -55,6 +56,9 @@ export default async function DashboardLayout({
         {/* Page content */}
         <main className="p-6">{children}</main>
       </div>
+
+      {/* Toast notifications (success/error feedback) */}
+      <Toaster richColors position="top-right" />
     </div>
   );
 }

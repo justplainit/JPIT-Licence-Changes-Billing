@@ -885,6 +885,145 @@ export async function POST(request: NextRequest) {
         }
 
         // ================================================================
+        // BELOW-BASELINE within-window reduction → SPLIT (review note)
+        // ================================================================
+        // The customer added seats within the 7-day window and has now reduced
+        // BELOW the pre-addition level. Two different things are happening and
+        // they bill differently:
+        //   • the recently-added seats (still in their 7-day window) are
+        //     creditable now, but
+        //   • the original committed seats can only be reduced at renewal.
+        // Auto-crediting the whole reduction would over-credit seats Crayon /
+        // Microsoft does not refund mid-term, so surface ONE clear review
+        // instruction that splits the two, and schedule the renewal-side
+        // reduction rather than crediting the lot.
+        if (priorSeatCount !== null && newQuantity < priorSeatCount) {
+          const addedWithinWindow = previousSeatCount - priorSeatCount;
+          const reduceAtRenewal = priorSeatCount - newQuantity;
+
+          const addedCredit = calculateSeatReductionCredit({
+            pricePerSeat,
+            seatsRemoved: addedWithinWindow,
+            reductionDate: changeDateObj,
+          });
+
+          const upcomingRenewalDate = getUpcomingRenewalDate(
+            subscription.renewalDate,
+            subscription.termType,
+            changeDateObj
+          );
+          const renewalDateStr = format(upcomingRenewalDate, "d MMMM yyyy");
+          const newMonthlyAtRenewal = pricePerSeat * newQuantity;
+
+          // Billing returns to the pre-addition baseline now (added seats
+          // cancelled within window); the deeper reduction lands at renewal.
+          await tx.subscription.update({
+            where: { id: subscriptionDbId },
+            data: { seatCount: priorSeatCount },
+          });
+
+          const change = await tx.subscriptionChange.create({
+            data: {
+              subscriptionId: subscriptionDbId,
+              changeType: "REMOVE_SEATS",
+              status: "APPLIED",
+              effectiveDate: changeDateObj,
+              previousSeatCount,
+              newSeatCount: priorSeatCount,
+              proRataAmount: -addedCredit.totalCredit,
+              billingCurrency: currency,
+              notes: `Within-window cancellation of ${addedWithinWindow} recently-added seat(s). Reduction drops below pre-addition level (${priorSeatCount}); remaining reduction to ${newQuantity} scheduled for renewal. Event: ${notificationEvent}`,
+              createdById: session.user!.id!,
+            },
+          });
+
+          // The addition's window has now been actioned.
+          if (openWindow) {
+            await tx.sevenDayWindow.update({
+              where: { id: openWindow.id },
+              data: { isClosed: true },
+            });
+          }
+
+          // Schedule the original-seat reduction for renewal.
+          await tx.scheduledChange.create({
+            data: {
+              subscriptionId: subscriptionDbId,
+              changeType: "REMOVE_SEATS",
+              scheduledDate: upcomingRenewalDate,
+              targetSeatCount: newQuantity,
+              notes: `Cloud-iQ: Reduce seats from ${priorSeatCount} to ${newQuantity} at renewal (original committed seats, outside 7-day window)`,
+            },
+          });
+
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              isScheduledChange: true,
+              description: [
+                `REVIEW: SPLIT SEAT REDUCTION for ${subscription.customer.name}`,
+                ``,
+                `Product: ${subscription.product.name}`,
+                `Cloud-iQ change: ${previousSeatCount} → ${newQuantity} seats on ${dateStr}`,
+                `Pre-addition level: ${priorSeatCount} seats`,
+                ``,
+                `This reduction drops BELOW the pre-addition level, so it splits in two:`,
+                ``,
+                `PART 1 — ${addedWithinWindow} recently-added seat${addedWithinWindow !== 1 ? "s" : ""} (within 7-day window) → CREDITABLE NOW`,
+                `  • Added within the last 7 days, so they can be cancelled.`,
+                `  • If their one-time pro-rata invoice was already sent, issue a credit note of`,
+                `    up to ${formatCurrency(addedCredit.totalCredit, currency)} (${addedWithinWindow} × unused portion of the month).`,
+                `  • If it was not sent, no credit is needed.`,
+                ``,
+                `PART 2 — ${reduceAtRenewal} original seat${reduceAtRenewal !== 1 ? "s" : ""} → REDUCE AT RENEWAL (${renewalDateStr})`,
+                `  • Original committed seats cannot be reduced mid-term — they bill until renewal.`,
+                `  • Do NOT credit these now.`,
+                `  • On ${renewalDateStr}: update the repeating invoice in Xero to ${newQuantity} seat${newQuantity !== 1 ? "s" : ""}`,
+                `    = ${formatCurrency(newMonthlyAtRenewal, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)}).`,
+                ``,
+                `Until renewal the customer continues to be billed for ${priorSeatCount} seats.`,
+              ].join("\n"),
+              productName: subscription.product.name,
+              newMonthlyAmount: newMonthlyAtRenewal,
+              newSeatCount: newQuantity,
+              actionByDate: changeDateObj,
+              reason: `Split reduction (review): ${previousSeatCount} → ${newQuantity}; ${addedWithinWindow} creditable now, ${reduceAtRenewal} at renewal – ${subscription.customer.name}`,
+            },
+          });
+
+          await tx.auditLog.create({
+            data: {
+              userId: session.user!.id!,
+              action: "CLOUD_IQ_APPLY_SPLIT_REDUCTION",
+              entityType: "Subscription",
+              entityId: subscriptionDbId,
+              details: `Cloud-iQ: Split reduction – ${addedWithinWindow} added seat(s) creditable within window, ${reduceAtRenewal} original seat(s) scheduled for renewal ${renewalDateStr}. ${previousSeatCount} → ${newQuantity}. Event: ${notificationEvent}`,
+              proRataAmount: -addedCredit.totalCredit,
+              sevenDayWindowOpen: false,
+              scheduledChangeCreated: true,
+              xeroInstructionsGen: true,
+            },
+          });
+
+          return {
+            changeType: "REMOVE_SEATS" as const,
+            withinWindow: true,
+            customerName: subscription.customer.name,
+            productName: subscription.product.name,
+            previousSeatCount,
+            newSeatCount: newQuantity,
+            scheduledFor: renewalDateStr,
+            currency,
+            tasks: [{
+              description: `SPLIT REDUCTION (review): ${addedWithinWindow} recently-added seat(s) creditable now (up to ${formatCurrency(addedCredit.totalCredit, currency)} if the pro-rata was already invoiced); ${reduceAtRenewal} original seat(s) reduce at renewal (${renewalDateStr}). Billed at ${priorSeatCount} until then.`,
+              actionByDate: changeDateObj.toISOString(),
+              reason: `Split reduction: ${previousSeatCount} → ${newQuantity}`,
+            }],
+            message: `This reduction drops below the pre-addition level, so it was split: ${addedWithinWindow} recently-added seat(s) are creditable now, and ${reduceAtRenewal} original seat(s) are scheduled to reduce at renewal (${renewalDateStr}). One review task has been created — please confirm the credit for the added seats and the renewal-side reduction.`,
+          };
+        }
+
+        // ================================================================
         // PARTIAL SEAT DECREASE within 7-day window (not a full reversal)
         // ================================================================
         await tx.subscription.update({

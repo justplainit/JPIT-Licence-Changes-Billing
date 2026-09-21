@@ -468,7 +468,12 @@ export async function POST(request: NextRequest) {
           sevenDayWindows: {
             where: {
               isClosed: false,
-              closesAt: { gte: new Date() },
+              // Evaluate the 7-day window as of when the change actually
+              // happened (the notification timestamp), NOT when it is being
+              // processed. A notification parsed days later must still be
+              // judged against the window that was open at the change date,
+              // otherwise a since-expired window is wrongly treated as closed.
+              closesAt: { gte: changeDateObj },
             },
             orderBy: { closesAt: "desc" },
           },
@@ -737,13 +742,16 @@ export async function POST(request: NextRequest) {
       }
 
       const priorSeatCount = originalChange?.previousSeatCount ?? null;
-      // Full reversal = seats returned to the pre-addition level within the
-      // grace period. With an open window we keep the existing <= test; via the
-      // fallback (no window) we require an exact return so a genuinely deeper
-      // reduction isn't misread as a reversal.
+      // Full reversal = seats returned to EXACTLY the pre-addition level within
+      // the grace period (added N seats, then removed exactly those N). That is
+      // a true no-op the added-seat pro-rata just cancels out. A reduction that
+      // lands BELOW the pre-addition level also removes original seats, so it is
+      // a genuine reduction that must be credited — not a no-op reversal. Hence
+      // an exact match is required whether or not a window is open; otherwise a
+      // deep reduction (e.g. 100→136 then →7) would be misread as a reversal and
+      // the seat count wrongly reset to the pre-addition level.
       const isFullReversal =
-        priorSeatCount !== null &&
-        (openWindow ? newQuantity <= priorSeatCount : newQuantity === priorSeatCount);
+        priorSeatCount !== null && newQuantity === priorSeatCount;
 
       if (openWindow || isFullReversal) {
         if (isFullReversal) {

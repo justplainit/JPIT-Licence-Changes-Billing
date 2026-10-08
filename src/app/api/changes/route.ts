@@ -7,7 +7,9 @@ import {
   calculateSeatReductionCredit,
   calculateUpgradeCost,
   calculate7DayWindow,
+  getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
+import { applyReductionAtRenewal, getRenewalWindow } from "@/lib/seat-reduction";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -89,7 +91,10 @@ export async function POST(request: NextRequest) {
           sevenDayWindows: {
             where: {
               isClosed: false,
-              closesAt: { gte: new Date() },
+              // Judge the window as of the change's effective date, not when
+              // it is being logged — a change logged days later must still be
+              // matched against the window that was open when it happened.
+              closesAt: { gte: changeDateObj },
             },
             orderBy: { closesAt: "desc" },
           },
@@ -435,13 +440,45 @@ export async function POST(request: NextRequest) {
               withinWindow: true,
             };
           } else {
-            // Outside 7-day window: schedule for next renewal
+            // At the renewal (or within the 7-day window it opens) the
+            // reduction takes effect for the new term — apply it now, exactly
+            // as the Cloud-iQ flow does.
+            const renewalWindow = getRenewalWindow(
+              subscription.renewalDate,
+              subscription.termType,
+              changeDateObj
+            );
+            if (renewalWindow.isOpen) {
+              return applyReductionAtRenewal(tx, {
+                subscription,
+                previousSeatCount,
+                newSeatCount,
+                pricePerSeat,
+                currency,
+                changeDate: changeDateObj,
+                userId: session.user!.id!,
+                isRenewalSync: false,
+                origin: "Logged manually",
+                detail: notes ? `Notes: ${notes}` : "",
+                auditAction: "RENEWAL_REDUCTION",
+              });
+            }
+
+            // Mid-term: schedule for the next renewal. The stored renewalDate
+            // may be a past anniversary, so roll it forward to the upcoming one.
+            const upcomingRenewalDate = getUpcomingRenewalDate(
+              subscription.renewalDate,
+              subscription.termType,
+              changeDateObj
+            );
+            const upcomingRenewalStr = upcomingRenewalDate.toISOString().split("T")[0];
+
             const change = await tx.subscriptionChange.create({
               data: {
                 subscriptionId,
                 changeType: "REMOVE_SEATS",
                 status: "SCHEDULED",
-                effectiveDate: subscription.renewalDate,
+                effectiveDate: upcomingRenewalDate,
                 previousSeatCount,
                 newSeatCount,
                 billingCurrency: currency,
@@ -454,7 +491,7 @@ export async function POST(request: NextRequest) {
               data: {
                 subscriptionId,
                 changeType: "REMOVE_SEATS",
-                scheduledDate: subscription.renewalDate,
+                scheduledDate: upcomingRenewalDate,
                 targetSeatCount: newSeatCount,
                 notes: `Reduce seats from ${previousSeatCount} to ${newSeatCount} at renewal`,
               },
@@ -466,7 +503,7 @@ export async function POST(request: NextRequest) {
                 action: "SCHEDULE_REMOVE_SEATS",
                 entityType: "Subscription",
                 entityId: subscriptionId,
-                details: `Scheduled seat reduction (${previousSeatCount} → ${newSeatCount}) for renewal date ${subscription.renewalDate.toISOString().split("T")[0]}. Outside 7-day window.`,
+                details: `Scheduled seat reduction (${previousSeatCount} → ${newSeatCount}) for renewal date ${upcomingRenewalStr}. Outside 7-day window.`,
                 sevenDayWindowOpen: false,
                 scheduledChangeCreated: true,
               },
@@ -476,7 +513,7 @@ export async function POST(request: NextRequest) {
               change,
               scheduledChange,
               withinWindow: false,
-              message: `Seat reduction scheduled for renewal date: ${subscription.renewalDate.toISOString().split("T")[0]}`,
+              message: `Seat reduction scheduled for renewal date: ${upcomingRenewalStr}`,
             };
           }
         }

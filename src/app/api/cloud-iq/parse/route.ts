@@ -183,6 +183,11 @@ export async function POST(request: NextRequest) {
           details = `Seat increase detected: ${subscription.seatCount} → ${notification.quantity} (+${seatDifference} seats)`;
         } else if (seatDifference < 0) {
           details = `Seat decrease detected: ${subscription.seatCount} → ${notification.quantity} (${seatDifference} seats)`;
+          // Decreases only take effect at renewal; a Partner Center
+          // synchronization is that renewal applying the reduced quantity.
+          if (/partner center synchroni[sz]ation/i.test(notification.changedBy)) {
+            details += ` — renewal reduction (Partner Center synchronization): will be applied immediately`;
+          }
         } else {
           details = `No seat change. Current: ${subscription.seatCount}, Cloud-iQ: ${notification.quantity}. Event: ${notification.event}`;
         }

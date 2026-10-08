@@ -136,6 +136,7 @@ export default function CloudIQPage() {
           notificationTime: result.notification.time,
           notificationEvent: result.notification.event,
           notificationSubscriptionId: result.notification.subscriptionId,
+          notificationChangedBy: result.notification.changedBy,
           applyType: isNewSubscription ? "new_subscription" : isCancellation ? "cancellation" : isSuspension ? "suspension" : "seat_change",
           ...(isNewSubscription && {
             customerId: result.match.customerId,

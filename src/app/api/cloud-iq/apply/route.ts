@@ -22,6 +22,7 @@ interface ApplyRequest {
   notificationTime: string;
   notificationEvent: string;
   notificationSubscriptionId: string;
+  notificationChangedBy?: string;
   applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
   customerId?: string;
   productId?: string;
@@ -35,7 +36,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, applyType, customerId, productId } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId } = body;
 
     // New subscriptions don't exist in the DB yet, so they have no
     // subscriptionDbId — the record is created below from customerId/productId.
@@ -713,6 +714,13 @@ export async function POST(request: NextRequest) {
       const seatsRemoved = subscription.seatCount - newQuantity;
       const previousSeatCount = subscription.seatCount;
 
+      // Seats can only be decreased mid-term at the next renewal. When the
+      // decrease comes from "Partner Center synchronization" (by the
+      // distributor, e.g. SoftwareOne), it is the renewal itself applying a
+      // reduction that was requested earlier — so it takes effect now,
+      // whatever renewal date we happen to have stored.
+      const isRenewalSync = /partner center synchroni[sz]ation/i.test(notificationChangedBy ?? "");
+
       // Check for open 7-day window
       const openWindow = subscription.sevenDayWindows.length > 0
         ? subscription.sevenDayWindows[0]
@@ -754,7 +762,9 @@ export async function POST(request: NextRequest) {
       const isFullReversal =
         priorSeatCount !== null && newQuantity === priorSeatCount;
 
-      if (openWindow || isFullReversal) {
+      // A renewal sync is not a cancellation of recently added seats, so it
+      // skips the addition-window handling and is applied as a renewal below.
+      if (!isRenewalSync && (openWindow || isFullReversal)) {
         if (isFullReversal) {
           // ================================================================
           // GRACE PERIOD FULL REVERSAL — no billing action needed
@@ -1179,9 +1189,26 @@ export async function POST(request: NextRequest) {
         changeDateObj
       );
       const renewalWindow = calculate7DayWindow(currentTermStart);
+      const withinRenewalWindow = changeDateObj < renewalWindow.closesAt;
 
-      if (changeDateObj < renewalWindow.closesAt) {
-        const termStartStr = format(currentTermStart, "d MMMM yyyy");
+      if (withinRenewalWindow || isRenewalSync) {
+        // A renewal sync outside the window computed from our stored renewal
+        // date means that stored date is wrong: Partner Center renewed on the
+        // change date. Use that date and flag the stored one for correction.
+        const storedRenewalWrong = isRenewalSync && !withinRenewalWindow;
+        const renewalDay = withinRenewalWindow
+          ? currentTermStart
+          : new Date(changeDateObj.getFullYear(), changeDateObj.getMonth(), changeDateObj.getDate());
+        const termStartStr = format(renewalDay, "d MMMM yyyy");
+        const storedRenewalStr = format(subscription.renewalDate, "d MMMM yyyy");
+        const renewalDateWarning = storedRenewalWrong
+          ? [
+              ``,
+              `⚠ CHECK RENEWAL DATE: the app has this subscription's renewal date as`,
+              `${storedRenewalStr}, but Partner Center renewed it on ${termStartStr}.`,
+              `Correct the renewal date on the subscription so future changes are scheduled correctly.`,
+            ]
+          : [];
         const newMonthlyTotal = pricePerSeat * newQuantity;
         const creditResult = calculateSeatReductionCredit({
           pricePerSeat,
@@ -1214,7 +1241,7 @@ export async function POST(request: NextRequest) {
           previousSeatCount,
           newSeatCount: newQuantity,
           billingCurrency: currency,
-          notes: `Applied from Cloud-iQ notification – reduction at renewal (term started ${termStartStr}). Event: ${notificationEvent}`,
+          notes: `Applied from Cloud-iQ notification – reduction at renewal (term started ${termStartStr})${isRenewalSync ? " via Partner Center synchronization" : ""}.${storedRenewalWrong ? ` Stored renewal date (${storedRenewalStr}) disagrees with the Partner Center renewal.` : ""} Event: ${notificationEvent}`,
         };
         const scheduledRecord = await tx.subscriptionChange.findFirst({
           where: {
@@ -1275,6 +1302,7 @@ export async function POST(request: NextRequest) {
             ``,
             `The reduction applies to the current term, so update the repeating`,
             `invoice now — the next invoice must go out at ${newQuantity} seats.`,
+            ...renewalDateWarning,
           ].join("\n"),
           productName: subscription.product.name,
           newMonthlyAmount: newMonthlyTotal,
@@ -1319,7 +1347,7 @@ export async function POST(request: NextRequest) {
             action: "CLOUD_IQ_APPLY_RENEWAL_REDUCTION",
             entityType: "Subscription",
             entityId: subscriptionDbId,
-            details: `Cloud-iQ: Reduction at renewal applied immediately (${previousSeatCount} → ${newQuantity}), term started ${termStartStr}. Possible credit ${formatCurrency(creditResult.totalCredit, currency)} if ${monthName} was already invoiced. Event: ${notificationEvent}`,
+            details: `Cloud-iQ: Reduction at renewal applied immediately (${previousSeatCount} → ${newQuantity}), term started ${termStartStr}${isRenewalSync ? " (Partner Center synchronization)" : ""}.${storedRenewalWrong ? ` Stored renewal date ${storedRenewalStr} needs correcting.` : ""} Possible credit ${formatCurrency(creditResult.totalCredit, currency)} if ${monthName} was already invoiced. Event: ${notificationEvent}`,
             proRataAmount: -creditResult.totalCredit,
             sevenDayWindowOpen: true,
             xeroInstructionsGen: true,
@@ -1340,7 +1368,7 @@ export async function POST(request: NextRequest) {
             actionByDate: a.actionByDate.toISOString(),
             reason: a.reason,
           })),
-          message: `Reduction took effect at the ${termStartStr} renewal, so it has been applied immediately (${previousSeatCount} → ${newQuantity}). Update the repeating invoice now; a credit note is only needed if ${monthName} was already invoiced at ${previousSeatCount} seats.`,
+          message: `Reduction took effect at the ${termStartStr} renewal, so it has been applied immediately (${previousSeatCount} → ${newQuantity}). Update the repeating invoice now; a credit note is only needed if ${monthName} was already invoiced at ${previousSeatCount} seats.${storedRenewalWrong ? ` Note: the app's stored renewal date (${storedRenewalStr}) disagrees with Partner Center — please correct it on the subscription.` : ""}`,
         };
       }
 
@@ -1395,6 +1423,10 @@ export async function POST(request: NextRequest) {
           `  1. Confirm the seat reduction has been applied in Partner Center / Crayon`,
           `  2. Update the repeating invoice in Xero to ${newQuantity} seats`,
           `  3. New monthly amount: ${formatCurrency(pricePerSeat * newQuantity, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+          ``,
+          `On the renewal, Cloud-iQ sends a "Partner Center synchronization" notification`,
+          `for this reduction. Parse and apply it — the app then applies the reduction and`,
+          `closes this task automatically.`,
         ].join("\n"),
         productName: subscription.product.name,
         newMonthlyAmount: pricePerSeat * newQuantity,

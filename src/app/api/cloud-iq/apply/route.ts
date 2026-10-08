@@ -766,9 +766,20 @@ export async function POST(request: NextRequest) {
       const isFullReversal =
         priorSeatCount !== null && newQuantity === priorSeatCount;
 
+      // Inside the 7-day window a renewal opens, ALL seats can be reduced
+      // immediately — not just recently added ones — so that takes precedence
+      // over the addition-window handling (which would only free the added
+      // seats and push the rest to the next renewal). An exact reversal of an
+      // addition keeps its own handling, which cancels that addition's pro-rata.
+      const renewalWindow = getRenewalWindow(
+        subscription.renewalDate,
+        subscription.termType,
+        changeDateObj
+      );
+
       // A renewal sync is not a cancellation of recently added seats, so it
       // skips the addition-window handling and is applied as a renewal below.
-      if (!isRenewalSync && (openWindow || isFullReversal)) {
+      if (!isRenewalSync && (isFullReversal || (openWindow && !renewalWindow.isOpen))) {
         if (isFullReversal) {
           // ================================================================
           // GRACE PERIOD FULL REVERSAL — no billing action needed
@@ -1189,11 +1200,6 @@ export async function POST(request: NextRequest) {
       // landing there — or one from "Partner Center synchronization", which IS
       // the renewal — has already taken effect, so apply it now rather than
       // pushing it out a term. Shared with Log Change.
-      const renewalWindow = getRenewalWindow(
-        subscription.renewalDate,
-        subscription.termType,
-        changeDateObj
-      );
       if (renewalWindow.isOpen || isRenewalSync) {
         return applyReductionAtRenewal(tx, {
           subscription,

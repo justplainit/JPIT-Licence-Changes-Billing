@@ -267,7 +267,16 @@ export async function POST(request: NextRequest) {
             ? subscription.sevenDayWindows[0]
             : null;
 
-          if (openWindow) {
+          // Inside the 7-day window a renewal opens, ALL seats can be reduced
+          // immediately, so that takes precedence over the addition-window
+          // handling (which only frees recently added seats).
+          const renewalWindow = getRenewalWindow(
+            subscription.renewalDate,
+            subscription.termType,
+            changeDateObj
+          );
+
+          if (openWindow && !renewalWindow.isOpen) {
             // Check if this is a full reversal (grace period cancellation)
             const originalChange = openWindow.changeId
               ? await tx.subscriptionChange.findUnique({ where: { id: openWindow.changeId } })
@@ -447,11 +456,6 @@ export async function POST(request: NextRequest) {
             // At the renewal (or within the 7-day window it opens) the
             // reduction takes effect for the new term — apply it now, exactly
             // as the Cloud-iQ flow does.
-            const renewalWindow = getRenewalWindow(
-              subscription.renewalDate,
-              subscription.termType,
-              changeDateObj
-            );
             if (renewalWindow.isOpen) {
               return applyReductionAtRenewal(tx, {
                 subscription,

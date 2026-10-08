@@ -24,6 +24,39 @@ export function getRenewalWindow(
 }
 
 /**
+ * Refuse to schedule a seat reduction that is already pending for the same
+ * subscription, target seat count and date — e.g. the same Cloud-iQ email
+ * applied twice, or a reduction logged again by hand. Throwing rolls back the
+ * surrounding transaction, so nothing is created and the message is shown.
+ */
+export async function assertReductionNotAlreadyScheduled(
+  tx: Prisma.TransactionClient,
+  subscriptionId: string,
+  targetSeatCount: number,
+  scheduledDate: Date
+): Promise<void> {
+  const dayStart = new Date(scheduledDate.getFullYear(), scheduledDate.getMonth(), scheduledDate.getDate());
+  const dayEnd = new Date(dayStart);
+  dayEnd.setDate(dayEnd.getDate() + 1);
+
+  const existing = await tx.scheduledChange.findFirst({
+    where: {
+      subscriptionId,
+      changeType: "REMOVE_SEATS",
+      targetSeatCount,
+      status: "PENDING",
+      scheduledDate: { gte: dayStart, lt: dayEnd },
+    },
+  });
+
+  if (existing) {
+    throw new Error(
+      `Already scheduled: a reduction to ${targetSeatCount} seat${targetSeatCount !== 1 ? "s" : ""} on ${format(scheduledDate, "d MMMM yyyy")} is already pending for this subscription. Nothing new was created.`
+    );
+  }
+}
+
+/**
  * Apply a seat reduction that takes effect at a renewal: on the renewal date
  * or inside the 7-day window it opens. Such a reduction has already taken
  * effect for the new term, so it is applied immediately — never pushed out to

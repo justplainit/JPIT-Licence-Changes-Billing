@@ -27,6 +27,7 @@ interface NotificationResult {
     seatDifference: number | null;
     status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
     details: string;
+    outOfSync?: { cloudIqFrom: number; appSeatCount: number };
   };
 }
 
@@ -124,6 +125,19 @@ export default function CloudIQPage() {
 
     if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription) return;
     if (!isNewSubscription && !result.match.subscriptionDbId) return;
+
+    const outOfSync = result.match.outOfSync;
+    if (
+      outOfSync &&
+      !window.confirm(
+        `The app is out of sync with Cloud-iQ for this subscription.\n\n` +
+          `Cloud-iQ changed it FROM ${outOfSync.cloudIqFrom} seats, but the app has ${outOfSync.appSeatCount}.\n\n` +
+          `This usually means an earlier notification was missed, undone, or this is an older email. ` +
+          `Applying it will start from the app's ${outOfSync.appSeatCount} seats.\n\nApply anyway?`
+      )
+    ) {
+      return;
+    }
 
     setApplyingIndex(index);
     try {
@@ -365,6 +379,21 @@ export default function CloudIQPage() {
                         </div>
                       </div>
                     )}
+
+                  {/* Out-of-sync warning */}
+                  {result.match.outOfSync && !appliedResults[index] && (
+                    <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                      <p className="font-semibold">
+                        ⚠ Out of sync with Cloud-iQ — review before applying
+                      </p>
+                      <p className="mt-1">
+                        Cloud-iQ changed this subscription <strong>from {result.match.outOfSync.cloudIqFrom}</strong> seats,
+                        but the app has <strong>{result.match.outOfSync.appSeatCount}</strong>. An earlier
+                        notification may have been missed or undone, or this is an older email. Applying it
+                        will calculate from the app&apos;s {result.match.outOfSync.appSeatCount} seats.
+                      </p>
+                    </div>
+                  )}
 
                   {result.match.status === "no_change" &&
                     result.match.currentSeatCount !== null && (

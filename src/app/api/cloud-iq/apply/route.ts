@@ -10,7 +10,11 @@ import {
   getNextRenewalDate,
   getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
-import { applyReductionAtRenewal, getRenewalWindow } from "@/lib/seat-reduction";
+import {
+  applyReductionAtRenewal,
+  assertReductionNotAlreadyScheduled,
+  getRenewalWindow,
+} from "@/lib/seat-reduction";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -926,6 +930,8 @@ export async function POST(request: NextRequest) {
           const renewalDateStr = format(upcomingRenewalDate, "d MMMM yyyy");
           const newMonthlyAtRenewal = pricePerSeat * newQuantity;
 
+          await assertReductionNotAlreadyScheduled(tx, subscriptionDbId, newQuantity, upcomingRenewalDate);
+
           // Billing returns to the pre-addition baseline now (added seats
           // cancelled within window); the deeper reduction lands at renewal.
           await tx.subscription.update({
@@ -1212,6 +1218,8 @@ export async function POST(request: NextRequest) {
         subscription.termType,
         changeDateObj
       );
+
+      await assertReductionNotAlreadyScheduled(tx, subscriptionDbId, newQuantity, upcomingRenewalDate);
 
       const change = await tx.subscriptionChange.create({
         data: {

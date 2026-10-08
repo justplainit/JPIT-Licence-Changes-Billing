@@ -67,6 +67,27 @@ export async function POST(
           revertActions.push(
             `Seat count restored: ${change.newSeatCount} back to ${change.previousSeatCount}`
           );
+
+          // A split reduction also scheduled the rest of the reduction for
+          // renewal, in the same transaction as this change. Cancel that
+          // schedule too, so Undo leaves nothing pending behind.
+          const createdFrom = new Date(change.createdAt.getTime() - 60_000);
+          const createdTo = new Date(change.createdAt.getTime() + 60_000);
+          const companionSchedules = await tx.scheduledChange.findMany({
+            where: {
+              subscriptionId: sub.id,
+              changeType: "REMOVE_SEATS",
+              status: "PENDING",
+              createdAt: { gte: createdFrom, lte: createdTo },
+            },
+          });
+          for (const sc of companionSchedules) {
+            await tx.scheduledChange.update({
+              where: { id: sc.id },
+              data: { status: "CANCELLED" },
+            });
+            revertActions.push(`Cancelled scheduled change: ${sc.id}`);
+          }
         }
 
         if (change.status === "SCHEDULED") {

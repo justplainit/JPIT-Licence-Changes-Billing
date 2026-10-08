@@ -57,6 +57,8 @@ export interface ParsedNotificationResult {
     seatDifference: number | null;
     status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
     details: string;
+    /** Set when Cloud-iQ's "changed from" quantity differs from the app's seat count. */
+    outOfSync?: { cloudIqFrom: number; appSeatCount: number };
   };
 }
 
@@ -192,6 +194,16 @@ export async function POST(request: NextRequest) {
           details = `No seat change. Current: ${subscription.seatCount}, Cloud-iQ: ${notification.quantity}. Event: ${notification.event}`;
         }
 
+        // "Quantity changed from X to Y": if X isn't what the app holds, the app
+        // has drifted from Cloud-iQ (a missed, undone or out-of-order
+        // notification), so applying would start from the wrong number.
+        const fromMatch = notification.event.match(/quantity\s+changed\s+from\s+(\d+)\s+to\s+\d+/i);
+        const cloudIqFrom = fromMatch ? parseInt(fromMatch[1], 10) : null;
+        const outOfSync =
+          status === "matched" && cloudIqFrom !== null && cloudIqFrom !== subscription.seatCount
+            ? { cloudIqFrom, appSeatCount: subscription.seatCount }
+            : undefined;
+
         results.push({
           notification,
           match: {
@@ -204,6 +216,7 @@ export async function POST(request: NextRequest) {
             seatDifference,
             status,
             details,
+            outOfSync,
           },
         });
       } else {

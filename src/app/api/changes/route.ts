@@ -9,7 +9,11 @@ import {
   calculate7DayWindow,
   getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
-import { applyReductionAtRenewal, getRenewalWindow } from "@/lib/seat-reduction";
+import {
+  applyReductionAtRenewal,
+  assertReductionNotAlreadyScheduled,
+  getRenewalWindow,
+} from "@/lib/seat-reduction";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -472,6 +476,8 @@ export async function POST(request: NextRequest) {
               changeDateObj
             );
             const upcomingRenewalStr = upcomingRenewalDate.toISOString().split("T")[0];
+
+            await assertReductionNotAlreadyScheduled(tx, subscriptionId, newSeatCount, upcomingRenewalDate);
 
             const change = await tx.subscriptionChange.create({
               data: {

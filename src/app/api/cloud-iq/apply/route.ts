@@ -9,6 +9,7 @@ import {
   formatCurrency,
   getNextRenewalDate,
   getUpcomingRenewalDate,
+  getMostRecentRenewalDate,
 } from "@/lib/billing-calculations";
 import {
   generateProRataInvoiceDraft,
@@ -1164,7 +1165,186 @@ export async function POST(request: NextRequest) {
         };
       }
 
-      // Outside 7-day window: schedule for renewal.
+      // ================================================================
+      // REDUCTION AT RENEWAL (on the renewal date or within 7 days after)
+      // ================================================================
+      // NCE lets seats be reduced at renewal and within the 7-day (168h) window
+      // that each renewal opens. A reduction landing there — typically
+      // "Partner Center synchronization" applying a pre-arranged reduction on
+      // the renewal date — has ALREADY taken effect for the new term, so it
+      // must be applied now, not pushed out to the following renewal.
+      const currentTermStart = getMostRecentRenewalDate(
+        subscription.renewalDate,
+        subscription.termType,
+        changeDateObj
+      );
+      const renewalWindow = calculate7DayWindow(currentTermStart);
+
+      if (changeDateObj < renewalWindow.closesAt) {
+        const termStartStr = format(currentTermStart, "d MMMM yyyy");
+        const newMonthlyTotal = pricePerSeat * newQuantity;
+        const creditResult = calculateSeatReductionCredit({
+          pricePerSeat,
+          seatsRemoved,
+          reductionDate: changeDateObj,
+        });
+
+        await tx.subscription.update({
+          where: { id: subscriptionDbId },
+          data: { seatCount: newQuantity },
+        });
+
+        // A reduction to this seat count may already have been scheduled for
+        // this renewal. It has now happened: mark it actioned and record the
+        // change as applied (reusing the scheduled record so there is one
+        // history entry, and Undo restores the right seat count).
+        await tx.scheduledChange.updateMany({
+          where: {
+            subscriptionId: subscriptionDbId,
+            changeType: "REMOVE_SEATS",
+            targetSeatCount: newQuantity,
+            status: "PENDING",
+          },
+          data: { status: "ACTIONED", actionedAt: new Date() },
+        });
+
+        const changeData = {
+          status: "APPLIED" as const,
+          effectiveDate: changeDateObj,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          billingCurrency: currency,
+          notes: `Applied from Cloud-iQ notification – reduction at renewal (term started ${termStartStr}). Event: ${notificationEvent}`,
+        };
+        const scheduledRecord = await tx.subscriptionChange.findFirst({
+          where: {
+            subscriptionId: subscriptionDbId,
+            changeType: "REMOVE_SEATS",
+            status: "SCHEDULED",
+            newSeatCount: newQuantity,
+          },
+          orderBy: { createdAt: "desc" },
+        });
+        if (scheduledRecord) {
+          await tx.subscriptionChange.update({
+            where: { id: scheduledRecord.id },
+            data: changeData,
+          });
+        } else {
+          await tx.subscriptionChange.create({
+            data: {
+              ...changeData,
+              subscriptionId: subscriptionDbId,
+              changeType: "REMOVE_SEATS",
+              createdById: session.user!.id!,
+            },
+          });
+        }
+
+        // Retire any pending "reduce at renewal" task for this reduction — it
+        // is replaced by the immediate tasks below.
+        const pendingScheduledTasks = await tx.amendmentQueueItem.findMany({
+          where: {
+            customerId: subscription.customerId,
+            productName: subscription.product.name,
+            isScheduledChange: true,
+            newSeatCount: newQuantity,
+            isCompleted: false,
+          },
+        });
+        for (const task of pendingScheduledTasks) {
+          await tx.amendmentQueueItem.update({
+            where: { id: task.id },
+            data: {
+              isCompleted: true,
+              completedAt: new Date(),
+              reason: task.reason + " [SUPERSEDED: reduction applied at renewal]",
+            },
+          });
+        }
+
+        amendmentItems.push({
+          description: [
+            `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero NOW`,
+            ``,
+            `Product: ${subscription.product.name}`,
+            `Change: ${previousSeatCount} seats → ${newQuantity} seats (remove ${seatsRemoved})`,
+            `Took effect: ${dateStr} (at the ${termStartStr} renewal)`,
+            ``,
+            `New monthly amount: ${formatCurrency(newMonthlyTotal, currency)} (${newQuantity} × ${formatCurrency(pricePerSeat, currency)})`,
+            ``,
+            `The reduction applies to the current term, so update the repeating`,
+            `invoice now — the next invoice must go out at ${newQuantity} seats.`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: newMonthlyTotal,
+          newSeatCount: newQuantity,
+          actionByDate: changeDateObj,
+          reason: `Reduction at renewal: ${previousSeatCount} → ${newQuantity} effective ${dateStr}`,
+        });
+
+        amendmentItems.push({
+          description: [
+            `CHECK: CREDIT NOTE MAY BE NEEDED for ${subscription.customer.name}`,
+            ``,
+            `Product: ${subscription.product.name}`,
+            `Seats removed at renewal: ${seatsRemoved}`,
+            `Period: ${format(creditResult.periodStart, "d MMM")} – ${format(creditResult.periodEnd, "d MMM yyyy")}`,
+            ``,
+            `  • IF the ${monthName} invoice was ALREADY SENT at ${previousSeatCount} seats →`,
+            `      issue a credit note for ${formatCurrency(creditResult.totalCredit, currency)}`,
+            `      (${seatsRemoved} × ${formatCurrency(creditResult.perSeatCredit, currency)} for the rest of ${monthName}).`,
+            `  • IF it was NOT sent yet →`,
+            `      no credit needed; just make sure it goes out at ${newQuantity} seats.`,
+          ].join("\n"),
+          productName: subscription.product.name,
+          newMonthlyAmount: -creditResult.totalCredit,
+          newSeatCount: seatsRemoved,
+          actionByDate: changeDateObj,
+          reason: `Possible credit for ${seatsRemoved} seat${seatsRemoved !== 1 ? "s" : ""} removed at renewal – ${subscription.customer.name}`,
+        });
+
+        for (const item of amendmentItems) {
+          await tx.amendmentQueueItem.create({
+            data: {
+              customerId: subscription.customerId,
+              ...item,
+            },
+          });
+        }
+
+        await tx.auditLog.create({
+          data: {
+            userId: session.user!.id!,
+            action: "CLOUD_IQ_APPLY_RENEWAL_REDUCTION",
+            entityType: "Subscription",
+            entityId: subscriptionDbId,
+            details: `Cloud-iQ: Reduction at renewal applied immediately (${previousSeatCount} → ${newQuantity}), term started ${termStartStr}. Possible credit ${formatCurrency(creditResult.totalCredit, currency)} if ${monthName} was already invoiced. Event: ${notificationEvent}`,
+            proRataAmount: -creditResult.totalCredit,
+            sevenDayWindowOpen: true,
+            xeroInstructionsGen: true,
+          },
+        });
+
+        return {
+          changeType: "REMOVE_SEATS" as const,
+          withinWindow: true,
+          customerName: subscription.customer.name,
+          productName: subscription.product.name,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          creditAmount: creditResult.totalCredit,
+          currency,
+          tasks: amendmentItems.map((a) => ({
+            description: a.description,
+            actionByDate: a.actionByDate.toISOString(),
+            reason: a.reason,
+          })),
+          message: `Reduction took effect at the ${termStartStr} renewal, so it has been applied immediately (${previousSeatCount} → ${newQuantity}). Update the repeating invoice now; a credit note is only needed if ${monthName} was already invoiced at ${previousSeatCount} seats.`,
+        };
+      }
+
+      // Outside every 7-day window: schedule for renewal.
       // The subscription's stored renewalDate may be a past anniversary, so roll
       // it forward to the next renewal on or after the change date.
       const upcomingRenewalDate = getUpcomingRenewalDate(

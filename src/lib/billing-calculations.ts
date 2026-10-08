@@ -363,13 +363,58 @@ export function getUpcomingRenewalDate(
   // Normalise the anchor to local midnight, preserving its day-of-month.
   let candidate = addMonthsClamped(renewalDate, 0);
 
+  // Renewal dates are stored at midnight but change timestamps carry a time of
+  // day, so compare against the start of the reference day: a change at 08:26
+  // on the renewal day is ON that renewal, not after it.
+  const referenceDay = startOfLocalDay(referenceDate);
+
   // Advance in whole-term multiples from the anchor until on or after the
-  // reference date. Guard against pathological loops with a generous bound.
+  // reference day. Guard against pathological loops with a generous bound.
   let k = 0;
-  while (candidate < referenceDate && k < 1200) {
+  while (candidate < referenceDay && k < 1200) {
     k += 1;
     candidate = addMonthsClamped(renewalDate, step * k);
   }
 
   return candidate;
+}
+
+/**
+ * Get the most recent renewal (anniversary) on or before a reference date —
+ * i.e. the start of the term the reference date falls in.
+ *
+ * The stored renewalDate may be a past or future anniversary, so step backward
+ * or forward from it in whole-term multiples (always from the original anchor,
+ * so no day-of-month drift accumulates).
+ */
+export function getMostRecentRenewalDate(
+  renewalDate: Date,
+  termType: "MONTHLY" | "ANNUAL" | "THREE_YEAR",
+  referenceDate: Date
+): Date {
+  const step = termMonths(termType);
+  const referenceDay = startOfLocalDay(referenceDate);
+
+  let k = 0;
+  let candidate = addMonthsClamped(renewalDate, 0);
+
+  // Step back while the anniversary is still after the reference day.
+  while (candidate > referenceDay && k > -1200) {
+    k -= 1;
+    candidate = addMonthsClamped(renewalDate, step * k);
+  }
+
+  // Step forward while the next anniversary is still on or before it.
+  while (k < 1200) {
+    const next = addMonthsClamped(renewalDate, step * (k + 1));
+    if (next > referenceDay) break;
+    k += 1;
+    candidate = next;
+  }
+
+  return candidate;
+}
+
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }

@@ -30,33 +30,45 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const subscriptionId = searchParams.get("subscriptionId");
     const type = searchParams.get("type");
-    const limit = parseInt(searchParams.get("limit") || "50", 10);
+    // Paging: 1-based page and a capped page size (`limit` kept as an alias).
+    const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10) || 1);
+    const pageSize = Math.min(
+      200,
+      Math.max(1, parseInt(searchParams.get("pageSize") || searchParams.get("limit") || "50", 10) || 50)
+    );
 
-    const changes = await prisma.subscriptionChange.findMany({
-      where: {
-        ...(subscriptionId && { subscriptionId }),
-        ...(type && { changeType: type as ChangeType }),
-      },
-      include: {
-        subscription: {
-          include: {
-            customer: true,
-            product: true,
+    const where = {
+      ...(subscriptionId && { subscriptionId }),
+      ...(type && { changeType: type as ChangeType }),
+    };
+
+    const [changes, total] = await prisma.$transaction([
+      prisma.subscriptionChange.findMany({
+        where,
+        include: {
+          subscription: {
+            include: {
+              customer: true,
+              product: true,
+            },
           },
+          createdBy: {
+            select: { id: true, name: true, email: true },
+          },
+          invoiceDraft: {
+            include: { lineItems: true },
+          },
+          sevenDayWindow: true,
         },
-        createdBy: {
-          select: { id: true, name: true, email: true },
-        },
-        invoiceDraft: {
-          include: { lineItems: true },
-        },
-        sevenDayWindow: true,
-      },
-      orderBy: { createdAt: "desc" },
-      take: limit,
-    });
+        // id breaks ties so records never shift between pages.
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      prisma.subscriptionChange.count({ where }),
+    ]);
 
-    return NextResponse.json(changes);
+    return NextResponse.json({ items: changes, total, page, pageSize });
   } catch (error) {
     console.error("Error fetching changes:", error);
     return NextResponse.json(

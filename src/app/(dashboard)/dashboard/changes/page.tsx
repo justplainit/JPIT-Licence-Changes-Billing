@@ -36,6 +36,10 @@ interface Change {
 
 export default function ChangesPage() {
   const [changes, setChanges] = useState<Change[]>([]);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,15 +61,21 @@ export default function ChangesPage() {
   });
 
   const fetchChanges = useCallback(async () => {
+    setRefreshing(true);
     try {
-      const res = await fetch("/api/changes?limit=50");
-      if (res.ok) setChanges(await res.json());
+      const res = await fetch(`/api/changes?page=${page}&pageSize=${pageSize}`);
+      if (res.ok) {
+        const data = await res.json();
+        setChanges(data.items);
+        setTotal(data.total);
+      }
     } catch {
       // ignore
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  }, []);
+  }, [page, pageSize]);
 
   const fetchSubscriptions = useCallback(async () => {
     try {
@@ -87,9 +97,16 @@ export default function ChangesPage() {
 
   useEffect(() => {
     fetchChanges();
+  }, [fetchChanges]);
+
+  useEffect(() => {
     fetchSubscriptions();
     fetchProducts();
-  }, [fetchChanges, fetchSubscriptions, fetchProducts]);
+  }, [fetchSubscriptions, fetchProducts]);
+
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const firstShown = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const lastShown = Math.min(page * pageSize, total);
 
   const selectedSub = subscriptions.find((s) => s.id === form.subscriptionId);
   const showSeatCount = ["ADD_SEATS", "REMOVE_SEATS"].includes(form.changeType);
@@ -132,7 +149,9 @@ export default function ChangesPage() {
         newProductId: "",
         notes: "",
       });
-      fetchChanges();
+      // Newest changes are on page 1 — go there so the new entry is visible.
+      if (page === 1) fetchChanges();
+      else setPage(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -219,7 +238,7 @@ export default function ChangesPage() {
           </div>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-gray-200">
+        <div className={`overflow-x-auto rounded-lg border border-gray-200 transition-opacity ${refreshing ? "opacity-60" : ""}`}>
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
@@ -307,6 +326,57 @@ export default function ChangesPage() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Paging */}
+      {!loading && total > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-600">
+          <div>
+            Showing{" "}
+            <span className="font-medium text-slate-900">
+              {firstShown}–{lastShown}
+            </span>{" "}
+            of <span className="font-medium text-slate-900">{total}</span> changes
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-2">
+              Rows per page
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setPage(1);
+                }}
+                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900"
+              >
+                {[25, 50, 100].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1 || refreshing}
+              onClick={() => setPage((p) => p - 1)}
+            >
+              Previous
+            </Button>
+            <span>
+              Page {page} of {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages || refreshing}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              Next
+            </Button>
+          </div>
         </div>
       )}
 

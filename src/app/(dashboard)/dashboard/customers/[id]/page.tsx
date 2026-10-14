@@ -19,6 +19,18 @@ interface ScheduledChange {
   status: string;
 }
 
+interface SubscriptionChange {
+  id: string;
+  changeType: string;
+  status: string;
+  effectiveDate: string;
+  createdAt: string;
+  previousSeatCount: number | null;
+  newSeatCount: number | null;
+  notes: string | null;
+  createdBy: { name: string } | null;
+}
+
 interface Subscription {
   id: string;
   productId: string;
@@ -34,6 +46,35 @@ interface Subscription {
   microsoftSubId: string | null;
   notes: string | null;
   scheduledChanges: ScheduledChange[];
+  changes: SubscriptionChange[];
+}
+
+interface Correction {
+  id: string;
+  entityId: string;
+  details: string | null;
+  createdAt: string;
+  user: { name: string } | null;
+}
+
+interface OpenTask {
+  id: string;
+  description: string;
+  productName: string;
+  actionByDate: string;
+}
+
+interface HistoryRow {
+  key: string;
+  date: string;
+  productId: string;
+  productName: string;
+  kind: string;
+  seats: string;
+  status: string;
+  by: string;
+  source: string;
+  changeId: string | null;
 }
 
 interface PriceEntry {
@@ -56,6 +97,8 @@ interface Customer {
   notes: string | null;
   subscriptions: Subscription[];
   prices: PriceEntry[];
+  corrections: Correction[];
+  openTasks: OpenTask[];
 }
 
 const statusColors: Record<string, string> = {
@@ -65,6 +108,70 @@ const statusColors: Record<string, string> = {
   EST: "bg-blue-100 text-blue-700",
   PENDING_RENEWAL: "bg-purple-100 text-purple-700",
 };
+
+const changeTypeLabels: Record<string, string> = {
+  ADD_SEATS: "Add seats",
+  REMOVE_SEATS: "Remove seats",
+  UPGRADE: "Upgrade",
+  DOWNGRADE: "Downgrade",
+  CANCELLATION: "Cancellation",
+  RENEWAL: "Renewal",
+  NEW_SUBSCRIPTION: "New subscription",
+  EST_ENTRY: "EST",
+};
+
+const historyStatusColors: Record<string, string> = {
+  APPLIED: "bg-green-100 text-green-700",
+  SCHEDULED: "bg-purple-100 text-purple-700",
+  PENDING: "bg-amber-100 text-amber-700",
+  CANCELLED: "bg-gray-100 text-gray-500 line-through",
+  CORRECTED: "bg-blue-100 text-blue-700",
+};
+
+/** Every change and direct correction recorded for the customer, newest first. */
+function buildHistory(customer: Customer): HistoryRow[] {
+  const subById = new Map(customer.subscriptions.map((s) => [s.id, s]));
+  const rows: HistoryRow[] = [];
+
+  for (const sub of customer.subscriptions) {
+    for (const c of sub.changes) {
+      // Cloud-iQ changes keep the original email's event in their notes.
+      const event = c.notes?.match(/Event: ([^\n]+)/)?.[1]?.trim();
+      const origin = c.notes?.includes("Cloud-iQ") ? "Cloud-iQ" : "Log Change";
+      rows.push({
+        key: c.id,
+        date: c.effectiveDate,
+        productId: sub.productId,
+        productName: sub.product.name,
+        kind: changeTypeLabels[c.changeType] ?? c.changeType,
+        seats: `${c.previousSeatCount ?? "–"} → ${c.newSeatCount ?? "–"}`,
+        status: c.status,
+        by: c.createdBy?.name ?? "",
+        source: event ? `${origin} · ${event}` : origin,
+        changeId: c.id,
+      });
+    }
+  }
+
+  for (const corr of customer.corrections) {
+    const sub = subById.get(corr.entityId);
+    if (!sub) continue;
+    rows.push({
+      key: corr.id,
+      date: corr.createdAt,
+      productId: sub.productId,
+      productName: sub.product.name,
+      kind: "Correction",
+      seats: corr.details?.split(": ").slice(1).join(": ") ?? "",
+      status: "CORRECTED",
+      by: corr.user?.name ?? "",
+      source: "Edited on this page",
+      changeId: null,
+    });
+  }
+
+  return rows.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+}
 
 export default function CustomerDetailPage() {
   const params = useParams();
@@ -78,6 +185,8 @@ export default function CustomerDetailPage() {
   const [editValues, setEditValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [historyProduct, setHistoryProduct] = useState("all");
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   // Price editing state
   const [editingPriceFor, setEditingPriceFor] = useState<string | null>(null); // productId
@@ -127,6 +236,8 @@ export default function CustomerDetailPage() {
       autoRenew: String(sub.autoRenew),
       microsoftSubId: sub.microsoftSubId || "",
       notes: sub.notes || "",
+      termType: sub.termType,
+      renewalDate: sub.renewalDate.slice(0, 10),
     });
     setSuccessMsg(null);
   };
@@ -154,6 +265,11 @@ export default function CustomerDetailPage() {
           autoRenew: editValues.autoRenew === "true",
           microsoftSubId: editValues.microsoftSubId || null,
           notes: editValues.notes || null,
+          termType: editValues.termType,
+          ...(editValues.renewalDate && {
+            renewalDate: editValues.renewalDate,
+            termEndDate: editValues.renewalDate,
+          }),
         }),
       });
 
@@ -171,6 +287,48 @@ export default function CustomerDetailPage() {
       setError(err instanceof Error ? err.message : "Failed to save");
     } finally {
       setSaving(null);
+    }
+  };
+
+  const undoChange = async (changeId: string) => {
+    if (!window.confirm("Undo this change? Its seat count and pending schedule are reverted.")) return;
+    setBusyId(changeId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/changes/${changeId}/revert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Manual revert from customer history" }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "Failed to undo change");
+      }
+      setSuccessMsg("Change undone");
+      setTimeout(() => setSuccessMsg(null), 3000);
+      fetchCustomer();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to undo change");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const completeTask = async (taskId: string) => {
+    setBusyId(taskId);
+    setError(null);
+    try {
+      const res = await fetch("/api/amendments", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: taskId, isCompleted: true }),
+      });
+      if (!res.ok) throw new Error("Failed to complete task");
+      fetchCustomer();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to complete task");
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -327,6 +485,13 @@ export default function CustomerDetailPage() {
       </div>
     );
   }
+
+  const historyRows = buildHistory(customer).filter(
+    (r) => historyProduct === "all" || r.productId === historyProduct
+  );
+  const historyProducts = Array.from(
+    new Map(customer.subscriptions.map((s) => [s.productId, s.product.name])).entries()
+  );
 
   return (
     <div className="space-y-6">
@@ -604,6 +769,40 @@ export default function CustomerDetailPage() {
                             placeholder="Optional"
                           />
                         </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            Term
+                          </label>
+                          <select
+                            value={editValues.termType}
+                            onChange={(e) =>
+                              setEditValues((prev) => ({
+                                ...prev,
+                                termType: e.target.value,
+                              }))
+                            }
+                            className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                          >
+                            <option value="MONTHLY">Monthly</option>
+                            <option value="ANNUAL">Annual</option>
+                            <option value="THREE_YEAR">3 years</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-slate-600 mb-1">
+                            Renewal Date
+                          </label>
+                          <Input
+                            type="date"
+                            value={editValues.renewalDate}
+                            onChange={(e) =>
+                              setEditValues((prev) => ({
+                                ...prev,
+                                renewalDate: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-slate-600 mb-1">
@@ -623,9 +822,11 @@ export default function CustomerDetailPage() {
                         />
                       </div>
                       <p className="text-xs text-slate-400">
-                        This is a direct data correction. It updates the seat count in the database
-                        without creating a billing change record. Use the &quot;Log Change&quot; page for
-                        actual mid-month licence changes that need pro-rata invoicing.
+                        This is a direct data correction. It updates the subscription without creating
+                        billing tasks, and is recorded in this customer&apos;s History. Use the &quot;Log
+                        Change&quot; page for actual mid-month licence changes that need pro-rata invoicing.
+                        Renewal date: any anniversary of the term (e.g. the 1st for a monthly term
+                        renewing on the 1st).
                       </p>
                     </div>
                   )}
@@ -804,6 +1005,102 @@ export default function CustomerDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Open billing tasks */}
+      {customer.openTasks.length > 0 && (
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900 mb-3">
+            Open Billing Tasks ({customer.openTasks.length})
+          </h2>
+          <div className="divide-y divide-gray-100 rounded-lg border border-gray-200 bg-white">
+            {customer.openTasks.map((task) => (
+              <div key={task.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-slate-900">
+                    {task.description.split("\n")[0]}
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    {task.productName} · Due {formatDate(task.actionByDate)}
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busyId === task.id}
+                  onClick={() => completeTask(task.id)}
+                >
+                  {busyId === task.id ? "..." : "Mark Complete"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* History: every change and correction recorded for this customer */}
+      <div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold text-slate-900">History</h2>
+          <select
+            value={historyProduct}
+            onChange={(e) => setHistoryProduct(e.target.value)}
+            className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm text-slate-900"
+          >
+            <option value="all">All products</option>
+            {historyProducts.map(([productId, name]) => (
+              <option key={productId} value={productId}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+        {historyRows.length === 0 ? (
+          <p className="text-sm text-slate-500">Nothing recorded yet.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-gray-200">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead className="bg-gray-50">
+                <tr>
+                  {["Date", "Product", "Change", "Seats", "Status", "By", "Source", ""].map((h) => (
+                    <th key={h} className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100 bg-white">
+                {historyRows.map((row) => (
+                  <tr key={row.key} className={row.status === "CANCELLED" ? "text-slate-400" : "text-slate-700"}>
+                    <td className="whitespace-nowrap px-4 py-2 text-sm">{formatDate(row.date)}</td>
+                    <td className="px-4 py-2 text-sm">{row.productName}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-sm">{row.kind}</td>
+                    <td className="px-4 py-2 text-sm">{row.seats}</td>
+                    <td className="px-4 py-2 text-sm">
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${historyStatusColors[row.status] ?? "bg-gray-100 text-gray-700"}`}>
+                        {row.status}
+                      </span>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-sm">{row.by}</td>
+                    <td className="px-4 py-2 text-xs text-slate-500">{row.source}</td>
+                    <td className="px-4 py-2 text-right">
+                      {row.changeId && row.status !== "CANCELLED" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyId === row.changeId}
+                          onClick={() => undoChange(row.changeId!)}
+                        >
+                          {busyId === row.changeId ? "..." : "Undo"}
+                        </Button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* Pricing History */}
       {customer.prices.length > 0 && (

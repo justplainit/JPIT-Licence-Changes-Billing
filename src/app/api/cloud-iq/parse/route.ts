@@ -139,6 +139,30 @@ export async function POST(request: NextRequest) {
       }
 
       if (subscription) {
+        // A cancellation/suspension email for a subscription already in that
+        // state was applied before (e.g. the same email pasted again): there
+        // is nothing to do, so don't offer to apply it a second time.
+        const alreadyInState =
+          (stateChange.isCancellation && subscription.status === "CANCELLED") ||
+          (stateChange.isSuspension && ["SUSPENDED", "CANCELLED"].includes(subscription.status));
+        if (stateChange.isStateChange && alreadyInState) {
+          results.push({
+            notification,
+            match: {
+              customerId: subscription.customerId,
+              customerName: subscription.customer.name,
+              subscriptionDbId: subscription.id,
+              productId: subscription.productId,
+              productName: subscription.product.name,
+              currentSeatCount: subscription.seatCount,
+              seatDifference: 0,
+              status: "no_change",
+              details: `Already ${subscription.status.toLowerCase()}: ${subscription.product.name}. This notification was applied before — nothing to do.`,
+            },
+          });
+          continue;
+        }
+
         // Check for state change events FIRST (these take priority over seat comparisons)
         if (stateChange.isStateChange && stateChange.isCancellation) {
           results.push({

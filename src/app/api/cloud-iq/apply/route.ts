@@ -70,6 +70,17 @@ export async function POST(request: NextRequest) {
           throw new Error("Subscription not found");
         }
 
+        // Guard against applying the same cancellation/suspension twice (e.g.
+        // from a results screen parsed before it was applied elsewhere).
+        if (
+          (applyType === "cancellation" && subscription.status === "CANCELLED") ||
+          (applyType === "suspension" && ["SUSPENDED", "CANCELLED"].includes(subscription.status))
+        ) {
+          throw new Error(
+            `Already ${subscription.status.toLowerCase()}: ${subscription.product.name} for ${subscription.customer.name}. Nothing new was created.`
+          );
+        }
+
         // Get customer price for the product
         const customerPrice = await tx.customerPrice.findFirst({
           where: {

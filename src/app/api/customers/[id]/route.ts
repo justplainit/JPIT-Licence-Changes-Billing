@@ -23,6 +23,12 @@ export async function GET(
             scheduledChanges: {
               where: { status: "PENDING" },
             },
+            // Full change history for the customer's History section.
+            changes: {
+              include: { createdBy: { select: { name: true } } },
+              orderBy: [{ effectiveDate: "desc" }, { createdAt: "desc" }],
+              take: 200,
+            },
           },
           orderBy: { createdAt: "desc" },
         },
@@ -42,7 +48,26 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(customer);
+    // Direct data corrections (no billing change record) and the customer's
+    // open billing tasks, so the page shows everything recorded for them.
+    const [corrections, openTasks] = await Promise.all([
+      prisma.auditLog.findMany({
+        where: {
+          action: "SUBSCRIPTION_CORRECTED",
+          entityType: "Subscription",
+          entityId: { in: customer.subscriptions.map((s) => s.id) },
+        },
+        include: { user: { select: { name: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 200,
+      }),
+      prisma.amendmentQueueItem.findMany({
+        where: { customerId: id, isCompleted: false },
+        orderBy: { actionByDate: "asc" },
+      }),
+    ]);
+
+    return NextResponse.json({ ...customer, corrections, openTasks });
   } catch (error) {
     console.error("Error fetching customer:", error);
     return NextResponse.json(

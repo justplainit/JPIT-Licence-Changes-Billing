@@ -60,6 +60,16 @@ export interface ParsedNotificationResult {
     details: string;
     /** Set when Cloud-iQ's "changed from" quantity differs from the app's seat count. */
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
+    /** For a duplicate: the change already recorded from this email. */
+    appliedChange?: {
+      id: string;
+      previousSeatCount: number | null;
+      newSeatCount: number | null;
+      status: string;
+      appliedOn: string;
+      /** It never reached the email's quantity (e.g. split under earlier rules). */
+      partly: boolean;
+    };
   };
 }
 
@@ -149,6 +159,38 @@ export async function POST(request: NextRequest) {
         });
         if (alreadyApplied) {
           const appliedOn = alreadyApplied.createdAt.toISOString().split("T")[0];
+          const appliedBy = alreadyApplied.createdBy?.name ? ` by ${alreadyApplied.createdBy.name}` : "";
+          const recorded = `${alreadyApplied.previousSeatCount ?? "–"} → ${alreadyApplied.newSeatCount ?? "–"}`;
+
+          // An email applied under earlier rules may only have been partly
+          // applied — e.g. a split that took 136 → 135 now and scheduled the
+          // rest — so the app never reached the email's quantity.
+          const target = notification.event.match(/quantity changed from \d+ to (\d+)/i);
+          const emailTarget = target ? parseInt(target[1], 10) : null;
+          // A split that still has its renewal-side schedule (pending, or
+          // actioned at renewal) was fully handled; only flag it when that
+          // part is gone.
+          let partly: { emailTarget: number } | undefined;
+          if (
+            emailTarget !== null &&
+            alreadyApplied.status === "APPLIED" &&
+            alreadyApplied.newSeatCount !== null &&
+            alreadyApplied.newSeatCount !== emailTarget
+          ) {
+            const rest = await prisma.scheduledChange.findFirst({
+              where: {
+                subscriptionId: subscription.id,
+                targetSeatCount: emailTarget,
+                status: { in: ["PENDING", "ACTIONED"] },
+                createdAt: {
+                  gte: new Date(alreadyApplied.createdAt.getTime() - 60_000),
+                  lte: new Date(alreadyApplied.createdAt.getTime() + 60_000),
+                },
+              },
+            });
+            if (!rest) partly = { emailTarget };
+          }
+
           results.push({
             notification,
             match: {
@@ -160,7 +202,17 @@ export async function POST(request: NextRequest) {
               currentSeatCount: subscription.seatCount,
               seatDifference: null,
               status: "duplicate",
-              details: `Already applied on ${appliedOn}${alreadyApplied.createdBy?.name ? ` by ${alreadyApplied.createdBy.name}` : ""} (${alreadyApplied.changeType.replace(/_/g, " ").toLowerCase()} ${alreadyApplied.previousSeatCount ?? "–"} → ${alreadyApplied.newSeatCount ?? "–"}, ${alreadyApplied.status.toLowerCase()}). To apply it again, Undo that change in the customer's History first.`,
+              details: partly
+                ? `Only partly applied on ${appliedOn}${appliedBy}: ${recorded} was recorded, but this email takes it to ${partly.emailTarget}, and nothing in the app takes it the rest of the way. If that was wrong, Undo it and this email can be applied again under the current rules.`
+                : `Already applied on ${appliedOn}${appliedBy} (${alreadyApplied.changeType.replace(/_/g, " ").toLowerCase()} ${recorded}, ${alreadyApplied.status.toLowerCase()}). To apply it again, Undo that change first.`,
+              appliedChange: {
+                id: alreadyApplied.id,
+                previousSeatCount: alreadyApplied.previousSeatCount,
+                newSeatCount: alreadyApplied.newSeatCount,
+                status: alreadyApplied.status,
+                appliedOn,
+                partly: !!partly,
+              },
             },
           });
           continue;

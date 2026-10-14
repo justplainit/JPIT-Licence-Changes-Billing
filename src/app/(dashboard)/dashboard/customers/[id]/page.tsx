@@ -836,12 +836,18 @@ export default function CustomerDetailPage() {
                     <div className="border-t border-gray-100 bg-gray-50 px-4 py-2">
                       <p className="text-xs text-slate-500">
                         Scheduled:{" "}
-                        {sub.scheduledChanges.map((sc) => (
-                          <span key={sc.id} className="font-medium">
-                            {sc.changeType.replace("_", " ").toLowerCase()}
-                            {sc.targetSeatCount != null &&
-                              ` to ${sc.targetSeatCount} seats`}{" "}
-                            on {formatDate(sc.scheduledDate)}
+                        {sub.scheduledChanges.map((sc, i) => (
+                          <span key={sc.id}>
+                            {i > 0 && " · "}
+                            <span className="font-medium">
+                              {sc.changeType.replace("_", " ").toLowerCase()}
+                              {sc.targetSeatCount != null &&
+                                ` to ${sc.targetSeatCount} seats`}{" "}
+                              on {formatDate(sc.scheduledDate)}
+                            </span>
+                            {new Date(sc.scheduledDate) < new Date() && (
+                              <span className="text-amber-700"> (date passed — never actioned)</span>
+                            )}
                           </span>
                         ))}
                       </p>

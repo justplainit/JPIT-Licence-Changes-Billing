@@ -28,6 +28,14 @@ interface NotificationResult {
     status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "duplicate";
     details: string;
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
+    appliedChange?: {
+      id: string;
+      previousSeatCount: number | null;
+      newSeatCount: number | null;
+      status: string;
+      appliedOn: string;
+      partly: boolean;
+    };
   };
 }
 
@@ -63,6 +71,7 @@ export default function CloudIQPage() {
   const [appliedResults, setAppliedResults] = useState<
     Record<number, ApplyResult>
   >({});
+  const [undoingIndex, setUndoingIndex] = useState<number | null>(null);
 
   const handleParse = async () => {
     if (!text.trim()) {
@@ -71,7 +80,6 @@ export default function CloudIQPage() {
     }
 
     setLoading(true);
-    setParsed(false);
     setAppliedResults({});
     try {
       const res = await fetch("/api/cloud-iq/parse", {
@@ -100,7 +108,15 @@ export default function CloudIQPage() {
         (r: NotificationResult) => r.match.status === "duplicate"
       ).length;
 
-      if (matched > 0) {
+      const partlyApplied = data.results.filter(
+        (r: NotificationResult) => r.match.appliedChange?.partly
+      ).length;
+
+      if (partlyApplied > 0) {
+        toast.warning(
+          `${partlyApplied} email(s) were only partly applied earlier — see the note on each.`
+        );
+      } else if (matched > 0) {
         toast.success(
           `Found ${matched} subscription(s) with seat changes.`
         );
@@ -179,6 +195,43 @@ export default function CloudIQPage() {
       toast.error("Failed to apply change");
     } finally {
       setApplyingIndex(null);
+    }
+  };
+
+  // Undo the change already recorded from this email, then parse again so
+  // the email can be applied under the current rules.
+  const handleUndoApplied = async (index: number, result: NotificationResult) => {
+    const applied = result.match.appliedChange;
+    if (!applied) return;
+    if (
+      !window.confirm(
+        `Undo the change recorded on ${applied.appliedOn} (${applied.previousSeatCount ?? "–"} → ${applied.newSeatCount ?? "–"} seats)?\n\n` +
+          `Seats go back to ${applied.previousSeatCount ?? "the previous count"}, and the tasks and schedules it created are closed. ` +
+          `The email is then parsed again so you can apply it under the current rules.\n\n` +
+          `Only do this if nothing else has changed this subscription since then.`
+      )
+    ) {
+      return;
+    }
+
+    setUndoingIndex(index);
+    try {
+      const res = await fetch(`/api/changes/${applied.id}/revert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Undone from Cloud-iQ to re-apply the email under the current rules" }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error || "Failed to undo the change");
+        return;
+      }
+      toast.success("Change undone. Parsing the email again…");
+      await handleParse();
+    } catch {
+      toast.error("Failed to undo the change");
+    } finally {
+      setUndoingIndex(null);
     }
   };
 
@@ -310,7 +363,9 @@ export default function CloudIQPage() {
               className={`rounded-lg border p-4 ${
                 appliedResults[index]
                   ? "bg-green-50 border-green-200"
-                  : statusColors[result.match.status]
+                  : result.match.appliedChange?.partly
+                    ? "bg-amber-50 border-amber-300"
+                    : statusColors[result.match.status]
               }`}
             >
               <div className="flex items-start justify-between">
@@ -320,6 +375,10 @@ export default function CloudIQPage() {
                     {appliedResults[index] ? (
                       <span className="rounded-full px-2 py-0.5 text-xs font-medium bg-green-100 text-green-800">
                         Applied
+                      </span>
+                    ) : result.match.appliedChange?.partly ? (
+                      <span className="rounded-full px-2 py-0.5 text-xs font-medium bg-amber-100 text-amber-800">
+                        Partly Applied
                       </span>
                     ) : (
                       <span
@@ -467,6 +526,26 @@ export default function CloudIQPage() {
                     </p>
                   )}
                 </div>
+
+                {/* Undo the change already recorded from this email */}
+                {result.match.status === "duplicate" &&
+                  result.match.appliedChange &&
+                  !appliedResults[index] && (
+                    <div className="ml-4">
+                      <Button
+                        variant="outline"
+                        onClick={() => handleUndoApplied(index, result)}
+                        disabled={undoingIndex !== null || loading}
+                        className={
+                          result.match.appliedChange.partly
+                            ? "border-amber-400 text-amber-900 hover:bg-amber-100"
+                            : ""
+                        }
+                      >
+                        {undoingIndex === index ? "Undoing..." : "Undo that change"}
+                      </Button>
+                    </div>
+                  )}
 
                 {/* Action button for seat changes */}
                 {result.match.status === "matched" &&

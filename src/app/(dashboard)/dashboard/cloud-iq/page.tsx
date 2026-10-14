@@ -25,7 +25,7 @@ interface NotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "duplicate";
     details: string;
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
   };
@@ -96,11 +96,16 @@ export default function CloudIQPage() {
       const noChange = data.results.filter(
         (r: NotificationResult) => r.match.status === "no_change"
       ).length;
+      const duplicates = data.results.filter(
+        (r: NotificationResult) => r.match.status === "duplicate"
+      ).length;
 
       if (matched > 0) {
         toast.success(
           `Found ${matched} subscription(s) with seat changes.`
         );
+      } else if (duplicates > 0 && duplicates === data.results.length) {
+        toast.info("Already applied — nothing to do.");
       } else if (noChange > 0) {
         toast.info("Notifications parsed. No seat changes detected.");
       } else {
@@ -193,6 +198,7 @@ export default function CloudIQPage() {
     suspension: "bg-orange-50 border-orange-200",
     reactivation: "bg-green-50 border-green-200",
     new_subscription: "bg-emerald-50 border-emerald-200",
+    duplicate: "bg-slate-50 border-slate-300",
   };
 
   const statusLabels: Record<string, string> = {
@@ -204,6 +210,7 @@ export default function CloudIQPage() {
     suspension: "Suspended",
     reactivation: "Reactivated",
     new_subscription: "New Subscription",
+    duplicate: "Already Applied",
   };
 
   const statusBadgeColors: Record<string, string> = {
@@ -215,6 +222,7 @@ export default function CloudIQPage() {
     suspension: "bg-orange-100 text-orange-800",
     reactivation: "bg-green-100 text-green-800",
     new_subscription: "bg-emerald-100 text-emerald-800",
+    duplicate: "bg-slate-200 text-slate-700",
   };
 
   return (
@@ -288,6 +296,10 @@ export default function CloudIQPage() {
               </span>
               <span className="rounded-full bg-red-100 px-2 py-1 text-red-800">
                 {results.filter((r) => r.match.status === "new").length} New
+              </span>
+              <span className="rounded-full bg-slate-200 px-2 py-1 text-slate-700">
+                {results.filter((r) => r.match.status === "duplicate").length}{" "}
+                Already Applied
               </span>
             </div>
           </div>

@@ -15,6 +15,7 @@ import {
   assertReductionNotAlreadyScheduled,
   getRenewalWindow,
 } from "@/lib/seat-reduction";
+import { findAppliedChangeForNotification, notifiedMarker } from "@/lib/cloud-iq-dedupe";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -55,6 +56,33 @@ export async function POST(request: NextRequest) {
     const effectiveDate = notificationTime ? new Date(notificationTime) : new Date();
     // Use a valid date; fall back to now if parsing fails
     const changeDateObj = isNaN(effectiveDate.getTime()) ? new Date() : effectiveDate;
+
+    // Refuse an email that was already applied (same timestamp and event) and
+    // not undone — e.g. from a results screen parsed before someone else
+    // applied it. A new subscription is found by its Microsoft subscription ID.
+    const existingSubscription = subscriptionDbId
+      ? { id: subscriptionDbId }
+      : notificationSubscriptionId
+        ? await prisma.subscription.findFirst({
+            where: { microsoftSubId: notificationSubscriptionId },
+            select: { id: true },
+          })
+        : null;
+    if (existingSubscription && notificationTime) {
+      const alreadyApplied = await findAppliedChangeForNotification(prisma, {
+        subscriptionId: existingSubscription.id,
+        eventTime: new Date(notificationTime),
+        event: notificationEvent,
+      });
+      if (alreadyApplied) {
+        return NextResponse.json(
+          {
+            error: `Already applied on ${alreadyApplied.createdAt.toISOString().split("T")[0]}${alreadyApplied.createdBy?.name ? ` by ${alreadyApplied.createdBy.name}` : ""}. Nothing new was created — Undo that change first if it needs to be re-applied.`,
+          },
+          { status: 409 }
+        );
+      }
+    }
 
     // ================================================================
     // CANCELLATION / EXPIRY
@@ -1247,7 +1275,9 @@ export async function POST(request: NextRequest) {
           previousSeatCount,
           newSeatCount: newQuantity,
           billingCurrency: currency,
-          notes: `Applied from Cloud-iQ notification (outside 7-day window – scheduled for renewal). Event: ${notificationEvent}`,
+          // effectiveDate is the renewal here, so record the email's own time
+          // for duplicate detection.
+          notes: `Applied from Cloud-iQ notification (outside 7-day window – scheduled for renewal). ${notifiedMarker(changeDateObj)}. Event: ${notificationEvent}`,
           createdById: session.user!.id!,
         },
       });

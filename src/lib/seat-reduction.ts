@@ -172,7 +172,15 @@ export async function applyReductionAtRenewal(
   });
   const [reused, ...duplicates] = scheduledRecords;
   if (reused) {
-    await tx.subscriptionChange.update({ where: { id: reused.id }, data: changeData });
+    // Keep the scheduled record's earlier notes (the original request's event
+    // and timestamp) so that email is still recognised as already applied.
+    await tx.subscriptionChange.update({
+      where: { id: reused.id },
+      data: {
+        ...changeData,
+        notes: reused.notes ? `${changeData.notes}\n${reused.notes}` : changeData.notes,
+      },
+    });
   } else {
     await tx.subscriptionChange.create({
       data: {

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
 import { parseCloudIQNotification } from "@/lib/cloud-iq-parser";
+import { findAppliedChangeForNotification } from "@/lib/cloud-iq-dedupe";
 
 // Detect state-change events from Cloud-iQ notifications
 const EXPIRED_STATES = ["expired", "deleted", "disabled"];
@@ -55,7 +56,7 @@ export interface ParsedNotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "duplicate";
     details: string;
     /** Set when Cloud-iQ's "changed from" quantity differs from the app's seat count. */
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
@@ -139,6 +140,32 @@ export async function POST(request: NextRequest) {
       }
 
       if (subscription) {
+        // This exact email (same timestamp and event) was already applied and
+        // not undone: it's a duplicate, so don't offer to apply it again.
+        const alreadyApplied = await findAppliedChangeForNotification(prisma, {
+          subscriptionId: subscription.id,
+          eventTime: new Date(notification.time),
+          event: notification.event,
+        });
+        if (alreadyApplied) {
+          const appliedOn = alreadyApplied.createdAt.toISOString().split("T")[0];
+          results.push({
+            notification,
+            match: {
+              customerId: subscription.customerId,
+              customerName: subscription.customer.name,
+              subscriptionDbId: subscription.id,
+              productId: subscription.productId,
+              productName: subscription.product.name,
+              currentSeatCount: subscription.seatCount,
+              seatDifference: null,
+              status: "duplicate",
+              details: `Already applied on ${appliedOn}${alreadyApplied.createdBy?.name ? ` by ${alreadyApplied.createdBy.name}` : ""} (${alreadyApplied.changeType.replace(/_/g, " ").toLowerCase()} ${alreadyApplied.previousSeatCount ?? "–"} → ${alreadyApplied.newSeatCount ?? "–"}, ${alreadyApplied.status.toLowerCase()}). To apply it again, Undo that change in the customer's History first.`,
+            },
+          });
+          continue;
+        }
+
         // A cancellation/suspension email for a subscription already in that
         // state was applied before (e.g. the same email pasted again): there
         // is nothing to do, so don't offer to apply it a second time.

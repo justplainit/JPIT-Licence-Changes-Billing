@@ -16,6 +16,7 @@ import {
   getRenewalWindow,
 } from "@/lib/seat-reduction";
 import { findAppliedChangeForNotification, notifiedMarker } from "@/lib/cloud-iq-dedupe";
+import { findOrCreateProductByName } from "@/lib/products";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -31,6 +32,8 @@ interface ApplyRequest {
   applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
   customerId?: string;
   productId?: string;
+  /** New subscription whose product isn't in the system: its name as Cloud-iQ gives it. */
+  productName?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -41,7 +44,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId, productName } = body;
 
     // New subscriptions don't exist in the DB yet, so they have no
     // subscriptionDbId — the record is created below from customerId/productId.
@@ -264,9 +267,9 @@ export async function POST(request: NextRequest) {
     // NEW SUBSCRIPTION
     // ================================================================
     if (applyType === "new_subscription") {
-      if (!customerId || !productId) {
+      if (!customerId || (!productId && !productName?.trim())) {
         return NextResponse.json(
-          { error: "customerId and productId are required for new subscriptions" },
+          { error: "customerId and a product are required for new subscriptions" },
           { status: 400 }
         );
       }
@@ -277,7 +280,11 @@ export async function POST(request: NextRequest) {
         const customer = await tx.customer.findUnique({ where: { id: customerId } });
         if (!customer) throw new Error("Customer not found");
 
-        const product = await tx.product.findUnique({ where: { id: productId } });
+        // A product Cloud-iQ names that isn't in the system yet is added under
+        // exactly that name, so later emails for it match.
+        const product = productId
+          ? await tx.product.findUnique({ where: { id: productId } })
+          : await findOrCreateProductByName(tx, productName!.trim());
         if (!product) throw new Error("Product not found");
 
         // Calculate dates based on ANNUAL term.
@@ -290,7 +297,7 @@ export async function POST(request: NextRequest) {
         const subscription = await tx.subscription.create({
           data: {
             customerId,
-            productId,
+            productId: product.id,
             termType: "ANNUAL",
             billingFrequency: "MONTHLY",
             seatCount,
@@ -319,7 +326,7 @@ export async function POST(request: NextRequest) {
         const customerPrice = await tx.customerPrice.findFirst({
           where: {
             customerId,
-            productId,
+            productId: product.id,
             effectiveTo: null,
           },
           orderBy: { effectiveFrom: "desc" },

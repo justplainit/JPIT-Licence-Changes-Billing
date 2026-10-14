@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
+import { generateSku } from "@/lib/products";
 import { TermType } from "@/generated/prisma";
 import { getNextRenewalDate } from "@/lib/billing-calculations";
 
@@ -69,15 +70,6 @@ function parseDateFlexible(raw: string): Date {
   const fallback = new Date();
   fallback.setFullYear(fallback.getFullYear() + 1);
   return fallback;
-}
-
-function generateSku(productName: string): string {
-  return productName
-    .toUpperCase()
-    .replace(/[^A-Z0-9\s]/g, "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .slice(0, 40);
 }
 
 export async function POST(request: NextRequest) {

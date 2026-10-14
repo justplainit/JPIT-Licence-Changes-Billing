@@ -60,6 +60,8 @@ export interface ParsedNotificationResult {
     details: string;
     /** Set when Cloud-iQ's "changed from" quantity differs from the app's seat count. */
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
+    /** New subscription whose product will be added (named as in Cloud-iQ) on create. */
+    productIsNew?: boolean;
     /** For a duplicate: the change already recorded from this email. */
     appliedChange?: {
       id: string;
@@ -346,7 +348,11 @@ export async function POST(request: NextRequest) {
         //      subscription goes live and is not yet in our system.
         const isNewSubscriptionEvent = /new subscription.*was created/i.test(notification.event);
         const isActivationEvent = stateChange.isStateChange && stateChange.isActivation;
-        const isNewSub = (isNewSubscriptionEvent || isActivationEvent) && customer && product;
+        const isNewSubEvent = isNewSubscriptionEvent || isActivationEvent;
+        const isNewSub = isNewSubEvent && customer && product;
+        // A product the system doesn't have yet is added under the name
+        // Cloud-iQ gives it when the subscription is created.
+        const isNewSubNewProduct = isNewSubEvent && customer && !product && !!notification.product?.trim();
 
         results.push({
           notification,
@@ -355,12 +361,15 @@ export async function POST(request: NextRequest) {
             customerName: customer?.name ?? null,
             subscriptionDbId: null,
             productId: product?.id ?? null,
-            productName: product?.name ?? null,
+            productName: product?.name ?? (isNewSubNewProduct ? notification.product.trim() : null),
             currentSeatCount: null,
             seatDifference: null,
-            status: isNewSub ? "new_subscription" : hasAnyMatch ? "partial" : "new",
+            status: isNewSub || isNewSubNewProduct ? "new_subscription" : hasAnyMatch ? "partial" : "new",
+            ...(isNewSubNewProduct && { productIsNew: true }),
             details: isNewSub
               ? `New subscription detected: ${customer!.name} – ${product!.name}. Ready to create subscription and set up billing.`
+              : isNewSubNewProduct
+                ? `New subscription detected: ${customer!.name} – ${notification.product.trim()}. This product isn't in the system yet; it will be added under this name when you create the subscription.`
               : hasAnyMatch
                 ? `Partial match: ${customer ? "Customer found" : "Customer not found"}, ${product ? "Product found" : "Product not found"}. No matching active subscription.`
                 : `No matching customer or product found. Customer: "${notification.cloudAccount}", Product: "${notification.product}"`,

@@ -28,6 +28,7 @@ interface NotificationResult {
     status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "duplicate";
     details: string;
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
+    productIsNew?: boolean;
     appliedChange?: {
       id: string;
       previousSeatCount: number | null;
@@ -176,6 +177,7 @@ export default function CloudIQPage() {
           ...(isNewSubscription && {
             customerId: result.match.customerId,
             productId: result.match.productId,
+            ...(!result.match.productId && { productName: result.match.productName }),
           }),
         }),
       });
@@ -498,6 +500,9 @@ export default function CloudIQPage() {
                         <div>
                           <p className="text-xs text-slate-500">Product</p>
                           <p className="font-medium text-slate-900">{result.match.productName}</p>
+                          {result.match.productIsNew && (
+                            <p className="mt-0.5 text-xs text-amber-700">New product — will be added to the system</p>
+                          )}
                         </div>
                         <div>
                           <p className="text-xs text-slate-500">Quantity</p>

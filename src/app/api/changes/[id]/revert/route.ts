@@ -123,6 +123,25 @@ export async function POST(
         revertActions.push(
           `Subscription reactivated to ACTIVE (${change.previousSeatCount ?? sub.seatCount} seats)`
         );
+      } else if (change.changeType === "NEW_SUBSCRIPTION") {
+        // The subscription only exists because of this change: take it out of
+        // billing, and unlink its Microsoft ID so a re-pasted email finds the
+        // right subscription (e.g. the one an upgrade actually came from).
+        await tx.subscription.update({
+          where: { id: sub.id },
+          data: {
+            status: "CANCELLED",
+            microsoftSubId: null,
+            notes: `${sub.notes ? `${sub.notes}\n` : ""}[UNDONE] Created in error${sub.microsoftSubId ? ` (Microsoft subscription ID was ${sub.microsoftSubId})` : ""}.`,
+          },
+        });
+        await tx.scheduledChange.updateMany({
+          where: { subscriptionId: sub.id, status: "PENDING" },
+          data: { status: "CANCELLED" },
+        });
+        revertActions.push(
+          `Subscription created in error: marked CANCELLED and unlinked from Microsoft ID ${sub.microsoftSubId ?? "(none)"}`
+        );
       } else if (
         change.changeType === "UPGRADE" ||
         change.changeType === "DOWNGRADE"

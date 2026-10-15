@@ -18,6 +18,7 @@ export async function applyProductUpgrade(
       customerId: string;
       productId: string;
       seatCount: number;
+      renewalDate?: Date;
       customer: { name: string; currency: string | null };
       product: { name: string };
     };
@@ -113,31 +114,49 @@ export async function applyProductUpgrade(
     !newPricePerSeat && newProduct.name,
   ].filter(Boolean);
 
+  const { credit, charge } = upgradeResult;
+  const period = `${format(changeDate, "d")}–${format(credit.periodEnd, "d MMM yyyy")}`;
+  const days = `${charge.daysRemaining}/${charge.daysInMonth} days`;
+  // Microsoft's billing month runs from the subscription's anniversary day.
+  // The amounts here assume it starts on the 1st.
+  const anniversaryDay = subscription.renewalDate?.getDate();
+  const offCycle = anniversaryDay !== undefined && anniversaryDay !== 1;
+
   const task = {
     description: [
       `PRODUCT UPGRADE for ${subscription.customer.name}: ${subscription.product.name} → ${newProduct.name}`,
+      `${seats} seat${seats !== 1 ? "s" : ""} · upgraded on ${dateStr} · term and renewal date unchanged`,
       ``,
-      `Seats: ${seats} · Upgraded on ${dateStr}`,
+      `HOW CRAYON BILLS THIS`,
+      `Microsoft credits the unused ${subscription.product.name} days and charges`,
+      `${newProduct.name} for the same days (${period}). Both show on`,
+      `Crayon's invoice for ${month} as a pair of upgrade ("convert") lines; from`,
+      `next month Crayon bills only ${newProduct.name}.`,
       ``,
-      `1. UPGRADE ADJUSTMENT INVOICE for the rest of ${month}:`,
-      `     credit ${subscription.product.name}: ${formatCurrency(upgradeResult.credit.totalAmount, currency)}`,
-      `     charge ${newProduct.name}: ${formatCurrency(upgradeResult.charge.totalAmount, currency)}`,
-      `     net: ${formatCurrency(upgradeResult.netAmount, currency)}`,
-      `2. UPDATE THE REPEATING INVOICE from ${nextMonthName}:`,
-      `     replace ${subscription.product.name} with ${newProduct.name}, ${seats} seats`,
-      `     = ${formatCurrency(newPricePerSeat * seats, currency)}/month (${seats} × ${formatCurrency(newPricePerSeat, currency)})`,
+      `1. ONE-TIME UPGRADE INVOICE in Xero — pass the same on to the customer:`,
+      `     Line 1: ${subscription.product.name} – credit ${period} (${days})`,
+      `             Qty ${seats} × −${formatCurrency(credit.perSeatProRata, currency)} = −${formatCurrency(credit.totalAmount, currency)}`,
+      `     Line 2: ${newProduct.name} – ${period} (${days})`,
+      `             Qty ${seats} × ${formatCurrency(charge.perSeatProRata, currency)} = ${formatCurrency(charge.totalAmount, currency)}`,
+      `     Total: ${formatCurrency(upgradeResult.netAmount, currency)} excl VAT`,
+      `   Leave ${month}'s repeating invoice as it is — line 1 already credits the`,
+      `   ${subscription.product.name} days it covered.`,
+      ``,
+      `2. REPEATING INVOICE from ${nextMonthName}: replace ${subscription.product.name}`,
+      `   with ${newProduct.name}, ${seats} seat${seats !== 1 ? "s" : ""} = ${formatCurrency(newPricePerSeat * seats, currency)}/month (${seats} × ${formatCurrency(newPricePerSeat, currency)}).`,
+      ...(offCycle
+        ? [``, `⚠ This subscription renews on day ${anniversaryDay} of the month, so Crayon's billing month`, `runs from day ${anniversaryDay}, not the 1st — check the days against Crayon's invoice.`]
+        : []),
       ...(missingPrices.length
-        ? [``, `⚠ No price in the system for ${missingPrices.join(" and ")} — work the amounts out from your own pricing.`]
+        ? [``, `⚠ No price in the system for ${missingPrices.join(" and ")} — work these amounts out from your own pricing.`]
         : []),
     ].join("\n"),
     productName: newProduct.name,
     newMonthlyAmount: newPricePerSeat * seats,
     newSeatCount: seats,
-    actionByDate: nextMonth,
-    reason: `Product upgrade: ${subscription.product.name} → ${newProduct.name} effective ${changeDate.toISOString().split("T")[0]}`,
-    proRataFraction: Math.round((upgradeResult.charge.daysRemaining / upgradeResult.charge.daysInMonth) * 100) / 100,
-    proRataDays: upgradeResult.charge.daysRemaining,
-    proRataDaysInMonth: upgradeResult.charge.daysInMonth,
+    // The one-time invoice is due now; the repeating invoice by next month.
+    actionByDate: changeDate,
+    reason: `Product upgrade: ${subscription.product.name} → ${newProduct.name} effective ${changeDate.toISOString().split("T")[0]} · net ${formatCurrency(upgradeResult.netAmount, currency)} for the rest of ${month}`,
     proRataAmount: upgradeResult.netAmount,
   };
 

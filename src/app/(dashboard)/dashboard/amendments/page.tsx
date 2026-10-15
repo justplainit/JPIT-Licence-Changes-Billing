@@ -101,10 +101,12 @@ export default function AmendmentsPage() {
             const isCreditNote = item.description.toUpperCase().includes("CREDIT NOTE");
             const isRepeatingInvoice = item.description.toUpperCase().includes("REPEATING INVOICE");
             const isRemoveLine = item.description.toUpperCase().includes("REMOVE LINE");
+            const isUpgrade = item.description.toUpperCase().startsWith("PRODUCT UPGRADE");
 
             let taskType = "UPDATE";
             let taskColor = "bg-blue-600";
-            if (isProRataInvoice) { taskType = "ONE-TIME INVOICE"; taskColor = "bg-amber-600"; }
+            if (isUpgrade) { taskType = "PRODUCT UPGRADE"; taskColor = "bg-violet-600"; }
+            else if (isProRataInvoice) { taskType = "ONE-TIME INVOICE"; taskColor = "bg-amber-600"; }
             else if (isCreditNote) { taskType = "CREDIT NOTE"; taskColor = "bg-red-600"; }
             else if (isRemoveLine) { taskType = "REMOVE FROM BILLING"; taskColor = "bg-red-600"; }
             else if (isRepeatingInvoice) { taskType = "REPEATING INVOICE"; taskColor = "bg-blue-600"; }
@@ -194,13 +196,18 @@ export default function AmendmentsPage() {
                         <span className="text-slate-500">Seats:</span> {item.newSeatCount}
                       </span>
                       <span className="rounded bg-slate-100 px-2 py-1 text-slate-700">
-                        <span className="text-slate-500">Monthly:</span> R {item.newMonthlyAmount.toFixed(2)}
+                        <span className="text-slate-500">{isUpgrade ? "New monthly:" : "Monthly:"}</span> R {item.newMonthlyAmount.toFixed(2)}
                       </span>
+                      {isUpgrade && item.proRataAmount != null && (
+                        <span className="rounded bg-violet-100 px-2 py-1 text-violet-800">
+                          <span className="text-violet-600">One-time upgrade invoice:</span> R {item.proRataAmount.toFixed(2)}
+                        </span>
+                      )}
                     </div>
                   )}
 
                   {/* Full instructions — preserved line breaks */}
-                  <details className={item.proRataFraction != null ? "" : "open"}>
+                  <details open={item.proRataFraction == null}>
                     <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-700 mb-2">
                       {item.proRataFraction != null ? "Show full instructions" : "Instructions"}
                     </summary>

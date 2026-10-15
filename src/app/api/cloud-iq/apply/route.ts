@@ -17,6 +17,7 @@ import {
 } from "@/lib/seat-reduction";
 import { findAppliedChangeForNotification, notifiedMarker } from "@/lib/cloud-iq-dedupe";
 import { findOrCreateProductByName } from "@/lib/products";
+import { applyProductUpgrade } from "@/lib/product-upgrade";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -29,11 +30,14 @@ interface ApplyRequest {
   notificationEvent: string;
   notificationSubscriptionId: string;
   notificationChangedBy?: string;
-  applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription";
+  applyType?: "seat_change" | "cancellation" | "suspension" | "new_subscription" | "product_change";
   customerId?: string;
   productId?: string;
   /** New subscription whose product isn't in the system: its name as Cloud-iQ gives it. */
   productName?: string;
+  /** Product change: the product the subscription moves to (by id, or its Cloud-iQ name if new). */
+  newProductId?: string;
+  newProductName?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -44,7 +48,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId, productName } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId, productName, newProductId, newProductName } = body;
 
     // New subscriptions don't exist in the DB yet, so they have no
     // subscriptionDbId — the record is created below from customerId/productId.
@@ -257,6 +261,67 @@ export async function POST(request: NextRequest) {
             actionByDate: a.actionByDate.toISOString(),
             reason: a.reason,
           })),
+        };
+      });
+
+      return NextResponse.json(result, { status: 201 });
+    }
+
+    // ================================================================
+    // PRODUCT CHANGE (e.g. Business Standard → Business Premium)
+    // ================================================================
+    if (applyType === "product_change") {
+      if (!newProductId && !newProductName?.trim()) {
+        return NextResponse.json(
+          { error: "The product to change to is required" },
+          { status: 400 }
+        );
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const subscription = await tx.subscription.findUnique({
+          where: { id: subscriptionDbId },
+          include: { customer: true, product: true },
+        });
+        if (!subscription) throw new Error("Subscription not found");
+
+        const newProduct = newProductId
+          ? await tx.product.findUnique({ where: { id: newProductId } })
+          : await findOrCreateProductByName(tx, newProductName!.trim());
+        if (!newProduct) throw new Error("Product not found");
+        if (newProduct.id === subscription.productId) {
+          throw new Error(`This subscription is already on ${newProduct.name}. Nothing new was created.`);
+        }
+
+        const fromProductName = subscription.product.name;
+        const { upgradeResult, task, currency } = await applyProductUpgrade(tx, {
+          subscription,
+          newProduct,
+          changeDate: changeDateObj,
+          userId: session.user!.id!,
+          notes: `Applied from Cloud-iQ notification: ${fromProductName} → ${newProduct.name}. Event: ${notificationEvent}`,
+          auditAction: "CLOUD_IQ_APPLY_PRODUCT_CHANGE",
+        });
+
+        // Link the subscription to its Microsoft ID so later emails match it.
+        if (notificationSubscriptionId && !subscription.microsoftSubId) {
+          await tx.subscription.update({
+            where: { id: subscription.id },
+            data: { microsoftSubId: notificationSubscriptionId },
+          });
+        }
+
+        return {
+          changeType: "UPGRADE" as const,
+          customerName: subscription.customer.name,
+          productName: newProduct.name,
+          previousProductName: fromProductName,
+          previousSeatCount: subscription.seatCount,
+          newSeatCount: subscription.seatCount,
+          proRataAmount: upgradeResult.netAmount,
+          currency,
+          tasks: [{ description: task.description, actionByDate: task.actionByDate.toISOString(), reason: task.reason }],
+          message: `${fromProductName} → ${newProduct.name} applied from ${format(changeDateObj, "d MMMM yyyy")}. An upgrade adjustment (net ${formatCurrency(upgradeResult.netAmount, currency)} for the rest of ${format(changeDateObj, "MMMM")}) and a repeating-invoice task were created.`,
         };
       });
 

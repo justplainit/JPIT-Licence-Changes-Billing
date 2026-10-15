@@ -25,6 +25,11 @@ export interface CloudIQNotification {
   product: string;
   quantity: number;
   subscriptionId: string;
+  /**
+   * From a "Friendly name changed from X to Y" line, which Cloud-iQ adds when
+   * a subscription moves to another product (e.g. an upgrade).
+   */
+  friendlyNameChange?: { from: string; to: string };
 }
 
 const FIELD_MAP: Record<string, keyof CloudIQNotification> = {
@@ -68,8 +73,15 @@ function parseBlock(block: string): CloudIQNotification | null {
   const lines = block.split("\n").map((l) => l.trim()).filter(Boolean);
 
   const fields: Record<string, string> = {};
+  let friendlyNameChange: { from: string; to: string } | undefined;
 
   for (const line of lines) {
+    const rename = line.match(/^friendly name changed from (.+) to (.+)$/i);
+    if (rename) {
+      friendlyNameChange = { from: rename[1].trim(), to: rename[2].trim() };
+      continue;
+    }
+
     // Match "Key: Value" pattern
     const match = line.match(/^([^:]+):\s*(.+)$/);
     if (!match) continue;
@@ -99,5 +111,6 @@ function parseBlock(block: string): CloudIQNotification | null {
     product: fields.product || "",
     quantity: parseInt(fields.quantity || "0", 10),
     subscriptionId: fields.subscriptionId || "",
+    ...(friendlyNameChange && { friendlyNameChange }),
   };
 }

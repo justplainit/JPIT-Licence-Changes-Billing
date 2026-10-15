@@ -47,6 +47,7 @@ export interface ParsedNotificationResult {
     product: string;
     quantity: number;
     subscriptionId: string;
+    friendlyNameChange?: { from: string; to: string };
   };
   match: {
     customerId: string | null;
@@ -56,10 +57,18 @@ export interface ParsedNotificationResult {
     productName: string | null;
     currentSeatCount: number | null;
     seatDifference: number | null;
-    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "duplicate";
+    status: "matched" | "partial" | "new" | "no_change" | "cancellation" | "suspension" | "reactivation" | "new_subscription" | "duplicate" | "product_change";
     details: string;
     /** Set when Cloud-iQ's "changed from" quantity differs from the app's seat count. */
     outOfSync?: { cloudIqFrom: number; appSeatCount: number };
+    /** For a product change (e.g. Standard → Premium): the product it moves to. */
+    productChange?: {
+      fromProductName: string;
+      toProductId: string | null;
+      toProductName: string;
+      /** The target product isn't in the system yet; it is added on apply. */
+      toProductIsNew: boolean;
+    };
     /** New subscription whose product will be added (named as in Cloud-iQ) on create. */
     productIsNew?: boolean;
     /** For a duplicate: the change already recorded from this email. */
@@ -151,6 +160,26 @@ export async function POST(request: NextRequest) {
         }
       }
 
+      // A product change names the NEW product, so when the subscription
+      // isn't linked by its Microsoft ID yet, look for the customer's active
+      // subscription on the product it changed FROM — otherwise it would look
+      // like a brand-new subscription and be billed twice.
+      const rename = notification.friendlyNameChange;
+      if (!subscription && rename && notification.cloudAccount) {
+        const customer = await prisma.customer.findFirst({
+          where: { name: { contains: notification.cloudAccount, mode: "insensitive" } },
+        });
+        const fromProduct = await prisma.product.findFirst({
+          where: { name: { equals: rename.from, mode: "insensitive" } },
+        });
+        if (customer && fromProduct) {
+          subscription = await prisma.subscription.findFirst({
+            where: { customerId: customer.id, productId: fromProduct.id, status: "ACTIVE" },
+            include: { customer: true, product: true },
+          });
+        }
+      }
+
       if (subscription) {
         // This exact email (same timestamp and event) was already applied and
         // not undone: it's a duplicate, so don't offer to apply it again.
@@ -215,6 +244,46 @@ export async function POST(request: NextRequest) {
                 appliedOn,
                 partly: !!partly,
               },
+            },
+          });
+          continue;
+        }
+
+        // Product change (e.g. Business Standard → Business Premium): Cloud-iQ
+        // adds "Friendly name changed from X to Y" and the Product field shows
+        // the new product. A rename alone (Product unchanged) is not one.
+        const toName = notification.product.trim();
+        if (
+          rename &&
+          rename.from.toLowerCase() !== rename.to.toLowerCase() &&
+          rename.to.toLowerCase() === toName.toLowerCase() &&
+          subscription.product.name.toLowerCase() !== toName.toLowerCase()
+        ) {
+          const toProduct =
+            (await prisma.product.findFirst({ where: { name: { equals: toName, mode: "insensitive" } } })) ??
+            (await prisma.product.findFirst({ where: { name: { contains: toName, mode: "insensitive" } } }));
+          const seatNote =
+            notification.quantity && notification.quantity !== subscription.seatCount
+              ? ` ⚠ Cloud-iQ shows ${notification.quantity} seats but the app has ${subscription.seatCount}: the change is applied to the app's ${subscription.seatCount} seats — sort out the seat difference separately.`
+              : "";
+          results.push({
+            notification,
+            match: {
+              customerId: subscription.customerId,
+              customerName: subscription.customer.name,
+              subscriptionDbId: subscription.id,
+              productId: subscription.productId,
+              productName: subscription.product.name,
+              currentSeatCount: subscription.seatCount,
+              seatDifference: null,
+              status: "product_change",
+              productChange: {
+                fromProductName: subscription.product.name,
+                toProductId: toProduct?.id ?? null,
+                toProductName: toProduct?.name ?? toName,
+                toProductIsNew: !toProduct,
+              },
+              details: `Product change: ${subscription.product.name} → ${toProduct?.name ?? toName} (${subscription.seatCount} seats) on the same subscription. Applying it credits the old product and charges the new one for the rest of the month, and updates the repeating invoice from next month. Term and renewal date stay the same.${!toProduct ? ` "${toName}" isn't in the system yet; it will be added under this name.` : ""}${seatNote}`,
             },
           });
           continue;

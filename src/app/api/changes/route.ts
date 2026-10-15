@@ -5,7 +5,6 @@ import { ChangeType } from "@/generated/prisma";
 import {
   calculateProRata,
   calculateSeatReductionCredit,
-  calculateUpgradeCost,
   calculate7DayWindow,
   getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
@@ -17,8 +16,8 @@ import {
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
-  generateUpgradeInvoiceDraft,
 } from "@/lib/invoice-generator";
+import { applyProductUpgrade } from "@/lib/product-upgrade";
 
 export async function GET(request: NextRequest) {
   try {
@@ -556,114 +555,13 @@ export async function POST(request: NextRequest) {
             throw new Error("New product not found");
           }
 
-          // Get price for new product
-          const newProductPrice = await tx.customerPrice.findFirst({
-            where: {
-              customerId: subscription.customerId,
-              productId: newProductId,
-              effectiveTo: null,
-            },
-            orderBy: { effectiveFrom: "desc" },
-          });
-
-          const newPricePerSeat = newProductPrice?.pricePerSeat ?? 0;
-
-          // Calculate upgrade cost
-          const upgradeResult = calculateUpgradeCost({
-            oldPricePerSeat: pricePerSeat,
-            newPricePerSeat,
-            seats: subscription.seatCount,
+          const { change, upgradeResult, upgradeDraft } = await applyProductUpgrade(tx, {
+            subscription,
+            newProduct,
             changeDate: changeDateObj,
-          });
-
-          const previousProductId = subscription.productId;
-
-          // Create change record
-          const change = await tx.subscriptionChange.create({
-            data: {
-              subscriptionId,
-              changeType: "UPGRADE",
-              status: "APPLIED",
-              effectiveDate: changeDateObj,
-              previousSeatCount: subscription.seatCount,
-              newSeatCount: subscription.seatCount,
-              previousProductId,
-              newProductId,
-              proRataAmount: upgradeResult.netAmount,
-              billingCurrency: currency,
-              notes,
-              createdById: session.user!.id!,
-            },
-          });
-
-          // Generate upgrade invoice draft
-          const upgradeDraft = generateUpgradeInvoiceDraft({
-            customerName: subscription.customer.name,
-            oldProductName: subscription.product.name,
-            newProductName: newProduct.name,
-            oldPricePerSeat: pricePerSeat,
-            newPricePerSeat,
-            seats: subscription.seatCount,
-            changeDate: changeDateObj,
-            currency,
-          });
-
-          await tx.invoiceDraft.create({
-            data: {
-              customerId: subscription.customerId,
-              changeId: change.id,
-              draftType: "UPGRADE_ADJUSTMENT",
-              invoiceDate: changeDateObj,
-              totalAmount: upgradeDraft.totalAmount,
-              currency,
-              notes: upgradeDraft.notes.join("\n"),
-              lineItems: {
-                create: upgradeDraft.lineItems.map((item, index) => ({
-                  description: item.description,
-                  quantity: item.quantity,
-                  unitPrice: item.unitPrice,
-                  lineTotal: item.lineTotal,
-                  calculationBreakdown: item.calculationBreakdown,
-                  sortOrder: index,
-                })),
-              },
-            },
-          });
-
-          // Update subscription product
-          await tx.subscription.update({
-            where: { id: subscriptionId },
-            data: { productId: newProductId },
-          });
-
-          // Create amendment queue item
-          await tx.amendmentQueueItem.create({
-            data: {
-              customerId: subscription.customerId,
-              description: `Update repeating invoice: change product from ${subscription.product.name} to ${newProduct.name}`,
-              productName: newProduct.name,
-              newMonthlyAmount: newPricePerSeat * subscription.seatCount,
-              newSeatCount: subscription.seatCount,
-              actionByDate: new Date(changeDateObj.getFullYear(), changeDateObj.getMonth() + 1, 1),
-              reason: `Product upgrade: ${subscription.product.name} → ${newProduct.name} effective ${changeDateObj.toISOString().split("T")[0]}`,
-              proRataFraction: Math.round((upgradeResult.charge.daysRemaining / upgradeResult.charge.daysInMonth) * 100) / 100,
-              proRataDays: upgradeResult.charge.daysRemaining,
-              proRataDaysInMonth: upgradeResult.charge.daysInMonth,
-              proRataAmount: upgradeResult.netAmount,
-            },
-          });
-
-          // Audit log
-          await tx.auditLog.create({
-            data: {
-              userId: session.user!.id!,
-              action: "UPGRADE",
-              entityType: "Subscription",
-              entityId: subscriptionId,
-              details: `Upgraded from ${subscription.product.name} to ${newProduct.name}. Net adjustment: ${upgradeResult.netAmount} ${currency}`,
-              proRataAmount: upgradeResult.netAmount,
-              xeroInstructionsGen: true,
-            },
+            userId: session.user!.id!,
+            notes,
+            auditAction: "UPGRADE",
           });
 
           return {

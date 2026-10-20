@@ -7,7 +7,6 @@ import {
   calculateSeatReductionCredit,
   calculate7DayWindow,
   formatCurrency,
-  getNextRenewalDate,
   getUpcomingRenewalDate,
 } from "@/lib/billing-calculations";
 import {
@@ -18,6 +17,7 @@ import {
 import { findAppliedChangeForNotification, notifiedMarker } from "@/lib/cloud-iq-dedupe";
 import { findOrCreateProductByName } from "@/lib/products";
 import { applyProductUpgrade } from "@/lib/product-upgrade";
+import { datePart, renewalDateProblem, TERM_LABELS } from "@/lib/subscription-terms";
 import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
@@ -38,6 +38,9 @@ interface ApplyRequest {
   /** Product change: the product the subscription moves to (by id, or its Cloud-iQ name if new). */
   newProductId?: string;
   newProductName?: string;
+  /** New subscription: the term and renewal date chosen at Create (YYYY-MM-DD). */
+  termType?: "MONTHLY" | "ANNUAL" | "THREE_YEAR";
+  renewalDate?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -48,7 +51,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body: ApplyRequest = await request.json();
-    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId, productName, newProductId, newProductName } = body;
+    const { subscriptionDbId, newQuantity, notificationTime, notificationEvent, notificationSubscriptionId, notificationChangedBy, applyType, customerId, productId, productName, newProductId, newProductName, termType, renewalDate: renewalDateInput } = body;
 
     // New subscriptions don't exist in the DB yet, so they have no
     // subscriptionDbId — the record is created below from customerId/productId.
@@ -339,6 +342,30 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // The term and renewal date aren't in the email: they are chosen when
+      // creating it. With end date alignment (our standard) the term ends on
+      // the last day of a month and renews on the 1st.
+      if (!termType || !["MONTHLY", "ANNUAL", "THREE_YEAR"].includes(termType)) {
+        return NextResponse.json(
+          { error: "Choose the term (Monthly, Annual or 3 years) for the new subscription" },
+          { status: 400 }
+        );
+      }
+      const startYmd = changeDateObj.toISOString().slice(0, 10);
+      const renewalYmd = renewalDateInput ? datePart(renewalDateInput) : null;
+      if (!renewalYmd) {
+        return NextResponse.json(
+          { error: "Choose the renewal date for the new subscription" },
+          { status: 400 }
+        );
+      }
+      const renewalProblem = renewalDateProblem(startYmd, termType, renewalYmd);
+      if (renewalProblem) {
+        return NextResponse.json({ error: renewalProblem }, { status: 400 });
+      }
+      const renewalDate = new Date(renewalYmd);
+      const isAligned = renewalDate.getUTCDate() === 1;
+
       const seatCount = newQuantity || 1;
 
       const result = await prisma.$transaction(async (tx) => {
@@ -352,18 +379,17 @@ export async function POST(request: NextRequest) {
           : await findOrCreateProductByName(tx, productName!.trim());
         if (!product) throw new Error("Product not found");
 
-        // Calculate dates based on ANNUAL term.
-        // Renewal is the anniversary of the start date (NCE model).
         const startDate = changeDateObj;
-        const renewalDate = getNextRenewalDate(startDate, "ANNUAL");
         const termEndDate = renewalDate;
+        const renewalStr = format(renewalDate, "d MMMM yyyy");
+        const termLabel = TERM_LABELS[termType];
 
         // Create the subscription
         const subscription = await tx.subscription.create({
           data: {
             customerId,
             productId: product.id,
-            termType: "ANNUAL",
+            termType,
             billingFrequency: "MONTHLY",
             seatCount,
             startDate,
@@ -414,7 +440,7 @@ export async function POST(request: NextRequest) {
             previousSeatCount: 0,
             newSeatCount: seatCount,
             billingCurrency: currency,
-            notes: `Created from Cloud-iQ notification. Event: ${notificationEvent}`,
+            notes: `Created from Cloud-iQ notification. ${termLabel} term, renews ${renewalStr}${isAligned ? " (end date aligned to calendar month)" : ""}. Event: ${notificationEvent}`,
             createdById: session.user!.id!,
           },
         });
@@ -493,6 +519,14 @@ export async function POST(request: NextRequest) {
             `  Total: ${formatCurrency(proRata.perSeatProRata, currency)} × ${seatCount} = ${formatCurrency(proRata.totalAmount, currency)}`,
             ``,
             `Create this as a one-time invoice in Xero (NOT on the repeating invoice).`,
+            ...(isAligned
+              ? []
+              : [
+                  ``,
+                  `⚠ This subscription's end date is NOT aligned to the calendar month (renews ${renewalStr}),`,
+                  `so Crayon bills it from day ${renewalDate.getUTCDate()} of each month, not the 1st — check this`,
+                  `amount against Crayon's invoice.`,
+                ]),
           ].join("\n"),
           productName: product.name,
           newMonthlyAmount: proRata.totalAmount,
@@ -540,7 +574,7 @@ export async function POST(request: NextRequest) {
             action: "CLOUD_IQ_APPLY_NEW_SUBSCRIPTION",
             entityType: "Subscription",
             entityId: subscription.id,
-            details: `Cloud-iQ: Created new subscription – ${product.name} (${seatCount} seats) for ${customer.name}. Pro rata: ${formatCurrency(proRata.totalAmount, currency)}. Event: ${notificationEvent}`,
+            details: `Cloud-iQ: Created new subscription – ${product.name} (${seatCount} seats) for ${customer.name}. ${termLabel} term, renews ${renewalStr}${isAligned ? " (aligned)" : ""}. Pro rata: ${formatCurrency(proRata.totalAmount, currency)}. Event: ${notificationEvent}`,
             proRataAmount: proRata.totalAmount,
             sevenDayWindowOpen: true,
             xeroInstructionsGen: true,

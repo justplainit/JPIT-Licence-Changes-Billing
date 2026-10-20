@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
 import { SubscriptionStatus, TermType } from "@/generated/prisma";
 import { calculate7DayWindow, getNextRenewalDate } from "@/lib/billing-calculations";
+import { datePart, renewalDateProblem } from "@/lib/subscription-terms";
 
 export async function GET(request: NextRequest) {
   try {
@@ -53,6 +54,7 @@ export async function POST(request: NextRequest) {
       seatCount,
       startDate,
       autoRenew,
+      renewalDate: renewalDateInput,
     } = body;
 
     if (!customerId || !productId || !termType || !seatCount || !startDate) {
@@ -73,7 +75,20 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const renewalDate = getNextRenewalDate(start, termType as TermType);
+    // A chosen renewal date (e.g. end date aligned to the calendar month, so
+    // it renews on the 1st) replaces the anniversary; it may shorten the
+    // first term but not extend it.
+    let renewalDate = getNextRenewalDate(start, termType as TermType);
+    if (renewalDateInput) {
+      const startYmd = datePart(String(startDate));
+      const renewalYmd = datePart(String(renewalDateInput));
+      if (!startYmd || !renewalYmd) {
+        return NextResponse.json({ error: "Invalid start or renewal date" }, { status: 400 });
+      }
+      const problem = renewalDateProblem(startYmd, termType as TermType, renewalYmd);
+      if (problem) return NextResponse.json({ error: problem }, { status: 400 });
+      renewalDate = new Date(renewalYmd);
+    }
     const termEndDate = renewalDate;
 
     const { opensAt, closesAt } = calculate7DayWindow(start);

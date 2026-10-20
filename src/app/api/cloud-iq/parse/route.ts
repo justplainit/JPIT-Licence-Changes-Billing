@@ -144,12 +144,15 @@ export async function POST(request: NextRequest) {
           });
 
           if (product) {
-            // For cancellations/expirations, also look for ACTIVE subscriptions to cancel
+            // Only a subscription not yet linked to a Microsoft ID can be this
+            // one: if it's linked to a different ID, the email is about another
+            // subscription (e.g. a second one for the same product).
             subscription = await prisma.subscription.findFirst({
               where: {
                 customerId: customer.id,
                 productId: product.id,
-                status: stateChange.isCancellation ? "ACTIVE" : "ACTIVE",
+                status: "ACTIVE",
+                ...(notification.subscriptionId && { microsoftSubId: null }),
               },
               include: {
                 customer: true,
@@ -174,7 +177,12 @@ export async function POST(request: NextRequest) {
         });
         if (customer && fromProduct) {
           subscription = await prisma.subscription.findFirst({
-            where: { customerId: customer.id, productId: fromProduct.id, status: "ACTIVE" },
+            where: {
+              customerId: customer.id,
+              productId: fromProduct.id,
+              status: "ACTIVE",
+              ...(notification.subscriptionId && { microsoftSubId: null }),
+            },
             include: { customer: true, product: true },
           });
         }

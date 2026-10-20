@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { dayBefore, formatYmd, renewalDateFor, type TermType } from "@/lib/subscription-terms";
 
 interface Product {
   id: string;
@@ -207,6 +208,8 @@ export default function CustomerDetailPage() {
     seatCount: "1",
     startDate: new Date().toISOString().split("T")[0],
     autoRenew: "true",
+    aligned: true,
+    renewalDate: "",
   });
   const [savingNewSub, setSavingNewSub] = useState(false);
 
@@ -411,8 +414,18 @@ export default function CustomerDetailPage() {
       seatCount: "1",
       startDate: new Date().toISOString().split("T")[0],
       autoRenew: "true",
+      aligned: true,
+      renewalDate: "",
     });
   };
+
+  // Renewal date of the new subscription: worked out from the start date and
+  // term (aligned to the calendar month by default), unless typed in.
+  const newSubRenewal =
+    newSubForm.renewalDate ||
+    (newSubForm.startDate
+      ? renewalDateFor(newSubForm.startDate, newSubForm.termType as TermType, newSubForm.aligned)
+      : "");
 
   const saveNewSubscription = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -435,6 +448,7 @@ export default function CustomerDetailPage() {
           seatCount,
           startDate: newSubForm.startDate,
           autoRenew: newSubForm.autoRenew === "true",
+          renewalDate: newSubRenewal,
         }),
       });
 
@@ -911,7 +925,7 @@ export default function CustomerDetailPage() {
                   <select
                     value={newSubForm.termType}
                     onChange={(e) =>
-                      setNewSubForm((prev) => ({ ...prev, termType: e.target.value }))
+                      setNewSubForm((prev) => ({ ...prev, termType: e.target.value, renewalDate: "" }))
                     }
                     className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   >
@@ -970,10 +984,45 @@ export default function CustomerDetailPage() {
                       setNewSubForm((prev) => ({
                         ...prev,
                         startDate: e.target.value,
+                        renewalDate: "",
                       }))
                     }
                   />
                 </div>
+              </div>
+
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 space-y-2">
+                <label className="flex items-center gap-2 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={newSubForm.aligned}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({ ...prev, aligned: e.target.checked, renewalDate: "" }))
+                    }
+                  />
+                  End date aligned to calendar month (our standard on Crayon)
+                </label>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">
+                    Renewal Date
+                  </label>
+                  <Input
+                    type="date"
+                    required
+                    value={newSubRenewal}
+                    onChange={(e) =>
+                      setNewSubForm((prev) => ({ ...prev, renewalDate: e.target.value }))
+                    }
+                  />
+                </div>
+                {newSubRenewal && (
+                  <p className="text-xs text-slate-600">
+                    First term ends {formatYmd(dayBefore(newSubRenewal))}, renews {formatYmd(newSubRenewal)}
+                    {!newSubRenewal.endsWith("-01") && (
+                      <span className="text-amber-700"> — not on the 1st: billing won&apos;t follow the calendar month</span>
+                    )}
+                  </p>
+                )}
               </div>
 
               <div>

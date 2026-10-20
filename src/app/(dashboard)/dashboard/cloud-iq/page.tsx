@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import { datePart, dayBefore, formatYmd, renewalDateFor, type TermType } from "@/lib/subscription-terms";
 
 interface NotificationResult {
   notification: {
@@ -69,6 +70,18 @@ interface ApplyResult {
   invoiceDraft?: string;
 }
 
+interface NewSubTerms {
+  termType: TermType | "";
+  aligned: boolean;
+  renewalDate: string; // YYYY-MM-DD
+}
+
+/** Renewal date for a new subscription from the email's (UTC) date. */
+function defaultRenewalDate(time: string, termType: TermType, aligned: boolean): string {
+  const start = datePart(time);
+  return start ? renewalDateFor(start, termType, aligned) : "";
+}
+
 export default function CloudIQPage() {
   const [text, setText] = useState("");
   const [results, setResults] = useState<NotificationResult[]>([]);
@@ -79,6 +92,22 @@ export default function CloudIQPage() {
     Record<number, ApplyResult>
   >({});
   const [undoingIndex, setUndoingIndex] = useState<number | null>(null);
+  const [newSubTerms, setNewSubTerms] = useState<Record<number, NewSubTerms>>({});
+
+  const termsFor = (index: number): NewSubTerms =>
+    newSubTerms[index] ?? { termType: "", aligned: true, renewalDate: "" };
+
+  const updateTerms = (index: number, time: string, change: Partial<NewSubTerms>) => {
+    setNewSubTerms((prev) => {
+      const next = { ...(prev[index] ?? { termType: "", aligned: true, renewalDate: "" }), ...change };
+      // Re-work the renewal date when the term or alignment changes; a date
+      // typed in by hand is kept until then.
+      if ((change.termType !== undefined || change.aligned !== undefined) && next.termType) {
+        next.renewalDate = defaultRenewalDate(time, next.termType, next.aligned);
+      }
+      return { ...prev, [index]: next };
+    });
+  };
 
   const handleParse = async () => {
     if (!text.trim()) {
@@ -88,6 +117,7 @@ export default function CloudIQPage() {
 
     setLoading(true);
     setAppliedResults({});
+    setNewSubTerms({});
     try {
       const res = await fetch("/api/cloud-iq/parse", {
         method: "POST",
@@ -162,6 +192,12 @@ export default function CloudIQPage() {
     if (!isCancellation && !isSuspension && !isSeatChange && !isNewSubscription && !productChange) return;
     if (!isNewSubscription && !result.match.subscriptionDbId) return;
 
+    const terms = termsFor(index);
+    if (isNewSubscription && (!terms.termType || !terms.renewalDate)) {
+      toast.error("Choose the term and renewal date before creating the subscription.");
+      return;
+    }
+
     const outOfSync = result.match.outOfSync;
     if (
       outOfSync &&
@@ -192,6 +228,8 @@ export default function CloudIQPage() {
             customerId: result.match.customerId,
             productId: result.match.productId,
             ...(!result.match.productId && { productName: result.match.productName }),
+            termType: terms.termType,
+            renewalDate: terms.renewalDate,
           }),
           ...(productChange && (productChange.toProductId
             ? { newProductId: productChange.toProductId }
@@ -556,6 +594,63 @@ export default function CloudIQPage() {
                           <p className="text-lg font-bold text-emerald-600">{result.notification.quantity || 1} seat{(result.notification.quantity || 1) !== 1 ? "s" : ""}</p>
                         </div>
                       </div>
+
+                      {/* Term and renewal date — not in the email, so ask */}
+                      {!appliedResults[index] && (() => {
+                        const terms = termsFor(index);
+                        const time = result.notification.time;
+                        return (
+                          <div className="mt-3 border-t border-emerald-200 pt-3 space-y-2">
+                            <p className="text-xs font-semibold text-slate-700">
+                              Term and renewal date (as chosen on Crayon)
+                            </p>
+                            <div className="flex flex-wrap items-end gap-3">
+                              <label className="text-xs text-slate-500">
+                                Term
+                                <select
+                                  value={terms.termType}
+                                  onChange={(e) => updateTerms(index, time, { termType: e.target.value as TermType })}
+                                  className={`mt-1 block rounded-md border px-2 py-1.5 text-sm text-slate-900 ${terms.termType ? "border-slate-300" : "border-amber-400 bg-amber-50"}`}
+                                >
+                                  <option value="" disabled>Choose term…</option>
+                                  <option value="MONTHLY">Monthly</option>
+                                  <option value="ANNUAL">Annual (1 year)</option>
+                                  <option value="THREE_YEAR">3 years</option>
+                                </select>
+                              </label>
+                              <label className="text-xs text-slate-500">
+                                Renewal date
+                                <input
+                                  type="date"
+                                  value={terms.renewalDate}
+                                  disabled={!terms.termType}
+                                  onChange={(e) => updateTerms(index, time, { renewalDate: e.target.value })}
+                                  className="mt-1 block rounded-md border border-slate-300 px-2 py-1 text-sm text-slate-900 disabled:bg-slate-100"
+                                />
+                              </label>
+                              <label className="flex items-center gap-2 pb-1.5 text-xs text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={terms.aligned}
+                                  onChange={(e) => updateTerms(index, time, { aligned: e.target.checked })}
+                                />
+                                End date aligned to calendar month (our standard)
+                              </label>
+                            </div>
+                            {terms.termType && terms.renewalDate ? (
+                              <p className="text-xs text-slate-600">
+                                First term ends <strong>{formatYmd(dayBefore(terms.renewalDate))}</strong>, renews{" "}
+                                <strong>{formatYmd(terms.renewalDate)}</strong>
+                                {!terms.renewalDate.endsWith("-01") && (
+                                  <span className="text-amber-700"> — not on the 1st: billing won&apos;t follow the calendar month</span>
+                                )}
+                              </p>
+                            ) : (
+                              <p className="text-xs text-amber-700">Choose the term to work out the renewal date.</p>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -671,7 +766,7 @@ export default function CloudIQPage() {
                     <div className="ml-4">
                       <Button
                         onClick={() => handleApply(index, result)}
-                        disabled={applyingIndex === index}
+                        disabled={applyingIndex === index || !termsFor(index).termType || !termsFor(index).renewalDate}
                         className="bg-emerald-600 hover:bg-emerald-700 text-white"
                       >
                         {applyingIndex === index

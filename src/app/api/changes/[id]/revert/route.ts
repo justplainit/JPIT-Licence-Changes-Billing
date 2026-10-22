@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { auth } from "@/lib/auth";
+import { replacedByMarker } from "@/lib/new-subscription-tasks";
 
 export async function POST(
   request: NextRequest,
@@ -222,6 +223,21 @@ export async function POST(
           },
         });
         revertActions.push(`Marked amendment as completed: ${amendment.id}`);
+      }
+
+      // Reopen the tasks this change replaced (e.g. a new subscription's
+      // "add to repeating invoice" task it changed to another seat count);
+      // their replacements were closed just above.
+      const marker = replacedByMarker(changeId);
+      const replacedTasks = await tx.amendmentQueueItem.findMany({
+        where: { reason: { contains: marker } },
+      });
+      for (const task of replacedTasks) {
+        await tx.amendmentQueueItem.update({
+          where: { id: task.id },
+          data: { isCompleted: false, completedAt: null, reason: task.reason.split(` ${marker}`)[0] },
+        });
+        revertActions.push(`Reopened task: ${task.description.split("\n")[0]}`);
       }
 
       // Audit log

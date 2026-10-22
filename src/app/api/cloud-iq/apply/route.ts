@@ -19,6 +19,11 @@ import { findOrCreateProductByName } from "@/lib/products";
 import { applyProductUpgrade } from "@/lib/product-upgrade";
 import { datePart, renewalDateProblem, TERM_LABELS } from "@/lib/subscription-terms";
 import {
+  applyReductionWithinPurchaseWindow,
+  isWithinPurchaseWindow,
+  updateOpenAddToRepeatingTask,
+} from "@/lib/new-subscription-tasks";
+import {
   generateProRataInvoiceDraft,
   generateCreditNoteDraft,
 } from "@/lib/invoice-generator";
@@ -795,9 +800,21 @@ export async function POST(request: NextRequest) {
           proRataAmount: proRata.totalAmount,
         });
 
-        // Task 2: Update repeating invoice from next month
+        // Task 2: Update repeating invoice from next month — unless the
+        // subscription is still waiting to be added to it, in which case that
+        // "add" task takes the new seat count instead.
         const newMonthlyTotal = pricePerSeat * newQuantity;
-        amendmentItems.push({
+        const updatedAddTask = await updateOpenAddToRepeatingTask(tx, {
+          customerId: subscription.customerId,
+          productName: subscription.product.name,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          pricePerSeat,
+          currency,
+          changeDate: changeDateObj,
+          changeId: change.id,
+        });
+        if (!updatedAddTask) amendmentItems.push({
           description: [
             `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
             ``,
@@ -919,8 +936,27 @@ export async function POST(request: NextRequest) {
       const renewalWindow = getRenewalWindow(
         subscription.renewalDate,
         subscription.termType,
-        changeDateObj
+        changeDateObj,
+        subscription.startDate
       );
+
+      // Within 7 days of buying a subscription every seat can still be
+      // cancelled: the reduction applies now and the open new-subscription
+      // tasks (pro-rata invoice, add to repeating invoice) take the new count.
+      if (!isRenewalSync && isWithinPurchaseWindow(subscription.startDate, changeDateObj)) {
+        return applyReductionWithinPurchaseWindow(tx, {
+          subscription,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          pricePerSeat,
+          currency,
+          changeDate: changeDateObj,
+          userId: session.user!.id!,
+          origin: "Applied from Cloud-iQ notification",
+          detail: `Event: ${notificationEvent}`,
+          auditAction: "CLOUD_IQ_APPLY_PURCHASE_WINDOW_REDUCTION",
+        });
+      }
 
       // A renewal sync is not a cancellation of recently added seats, so it
       // skips the addition-window handling and is applied as a renewal below.
@@ -1277,9 +1313,19 @@ export async function POST(request: NextRequest) {
           reason: `Credit note for ${seatsRemoved} removed seat${seatsRemoved !== 1 ? "s" : ""} – ${subscription.customer.name}`,
         });
 
-        // Task 2: Update repeating invoice
+        // Task 2: Update repeating invoice (or its pending "add" task)
         const newMonthlyTotal = pricePerSeat * newQuantity;
-        amendmentItems.push({
+        const updatedAddTask = await updateOpenAddToRepeatingTask(tx, {
+          customerId: subscription.customerId,
+          productName: subscription.product.name,
+          previousSeatCount,
+          newSeatCount: newQuantity,
+          pricePerSeat,
+          currency,
+          changeDate: changeDateObj,
+          changeId: change.id,
+        });
+        if (!updatedAddTask) amendmentItems.push({
           description: [
             `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero`,
             ``,

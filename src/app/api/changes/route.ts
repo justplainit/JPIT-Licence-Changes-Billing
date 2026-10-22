@@ -18,6 +18,11 @@ import {
   generateCreditNoteDraft,
 } from "@/lib/invoice-generator";
 import { applyProductUpgrade } from "@/lib/product-upgrade";
+import {
+  applyReductionWithinPurchaseWindow,
+  isWithinPurchaseWindow,
+  updateOpenAddToRepeatingTask,
+} from "@/lib/new-subscription-tasks";
 
 export async function GET(request: NextRequest) {
   try {
@@ -224,11 +229,26 @@ export async function POST(request: NextRequest) {
             },
           });
 
+          // Not on the repeating invoice yet? Its pending "add" task takes
+          // the new count, and this task is just the pro-rata invoice.
+          const updatedAddTask = await updateOpenAddToRepeatingTask(tx, {
+            customerId: subscription.customerId,
+            productName: subscription.product.name,
+            previousSeatCount,
+            newSeatCount,
+            pricePerSeat,
+            currency,
+            changeDate: changeDateObj,
+            changeId: change.id,
+          });
+
           // Create amendment queue item for next billing cycle
           await tx.amendmentQueueItem.create({
             data: {
               customerId: subscription.customerId,
-              description: `Update repeating invoice: ${subscription.product.name} from ${previousSeatCount} to ${newSeatCount} seats`,
+              description: updatedAddTask
+                ? `SEND ONE-TIME PRO-RATA INVOICE to ${subscription.customer.name}: ${additionalSeats} ${subscription.product.name} seat${additionalSeats !== 1 ? "s" : ""} added ${changeDateObj.toISOString().split("T")[0]} (the "Add to repeating invoice" task now has ${newSeatCount} seats)`
+                : `Update repeating invoice: ${subscription.product.name} from ${previousSeatCount} to ${newSeatCount} seats`,
               productName: subscription.product.name,
               newMonthlyAmount: pricePerSeat * newSeatCount,
               newSeatCount,
@@ -284,8 +304,25 @@ export async function POST(request: NextRequest) {
           const renewalWindow = getRenewalWindow(
             subscription.renewalDate,
             subscription.termType,
-            changeDateObj
+            changeDateObj,
+            subscription.startDate
           );
+
+          // Within 7 days of purchase every seat can still be cancelled.
+          if (isWithinPurchaseWindow(subscription.startDate, changeDateObj)) {
+            return applyReductionWithinPurchaseWindow(tx, {
+              subscription,
+              previousSeatCount,
+              newSeatCount,
+              pricePerSeat,
+              currency,
+              changeDate: changeDateObj,
+              userId: session.user!.id!,
+              origin: "Logged manually",
+              detail: notes ? `Notes: ${notes}` : "",
+              auditAction: "PURCHASE_WINDOW_REDUCTION",
+            });
+          }
 
           if (openWindow && !renewalWindow.isOpen) {
             // Check if this is a full reversal (grace period cancellation)

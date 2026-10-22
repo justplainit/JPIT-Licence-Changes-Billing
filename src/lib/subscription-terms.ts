@@ -41,16 +41,25 @@ export function renewalDateFor(start: string, termType: TermType, aligned: boole
 }
 
 /**
- * Why a chosen renewal date can't be right, or null if it can. End date
- * alignment can shorten the first term but never extend it.
+ * Why a chosen renewal date can't be right, or null if it can. It must be
+ * after the start, and no later than the end of the month the full term
+ * ends in (Crayon's alignment can end an annual bought on 19 Oct on 31 Oct
+ * the next year). Anything later isn't a single term.
  */
 export function renewalDateProblem(start: string, termType: TermType, renewal: string): string | null {
-  const latest = renewalDateFor(start, termType, false);
+  const anniversary = renewalDateFor(start, termType, false);
+  const [y, m] = split(anniversary);
+  const latest = anniversary.endsWith("-01") ? anniversary : ymdUTC(Date.UTC(y, m, 1));
   if (renewal <= start) return `The renewal date must be after the start date (${formatYmd(start)}).`;
   if (renewal > latest) {
-    return `The renewal date can't be later than ${formatYmd(latest)} — end date alignment can shorten a ${TERM_LABELS[termType].toLowerCase()} term, not extend it.`;
+    return `The renewal date can't be later than ${formatYmd(latest)} for a ${TERM_LABELS[termType].toLowerCase()} term starting ${formatYmd(start)}.`;
   }
   return null;
+}
+
+/** The renewal date is later than a full term from the start (only possible with alignment). */
+export function isLongerThanTerm(start: string, termType: TermType, renewal: string): boolean {
+  return renewal > renewalDateFor(start, termType, false);
 }
 
 export function dayBefore(ymd: string): string {

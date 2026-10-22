@@ -6,21 +6,30 @@ import {
   formatCurrency,
   getMostRecentRenewalDate,
 } from "./billing-calculations";
+import { updateOpenAddToRepeatingTask } from "./new-subscription-tasks";
 
 type TermType = "MONTHLY" | "ANNUAL" | "THREE_YEAR";
 
 /**
  * The 7-day (168h) window opened by the most recent renewal on or before the
  * change date. NCE allows seat reductions at renewal and within this window.
+ *
+ * Counting back from the renewal date can land on (or before) the purchase
+ * date — that's the purchase, not a renewal — so with `startDate` given such
+ * a "renewal" never counts as open.
  */
 export function getRenewalWindow(
   renewalDate: Date,
   termType: TermType,
-  changeDate: Date
+  changeDate: Date,
+  startDate?: Date
 ): { termStart: Date; closesAt: Date; isOpen: boolean } {
   const termStart = getMostRecentRenewalDate(renewalDate, termType, changeDate);
   const { closesAt } = calculate7DayWindow(termStart);
-  return { termStart, closesAt, isOpen: changeDate < closesAt };
+  const isPurchase =
+    startDate !== undefined &&
+    termStart.getTime() <= new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate()).getTime();
+  return { termStart, closesAt, isOpen: !isPurchase && changeDate < closesAt };
 }
 
 /**
@@ -71,6 +80,7 @@ export async function applyReductionAtRenewal(
       customerId: string;
       renewalDate: Date;
       termType: TermType;
+      startDate?: Date;
       customer: { name: string };
       product: { name: string };
     };
@@ -104,7 +114,7 @@ export async function applyReductionAtRenewal(
   } = params;
 
   const seatsRemoved = previousSeatCount - newSeatCount;
-  const window = getRenewalWindow(subscription.renewalDate, subscription.termType, changeDate);
+  const window = getRenewalWindow(subscription.renewalDate, subscription.termType, changeDate, subscription.startDate);
 
   // A renewal sync outside the window computed from our stored renewal date
   // means that stored date is wrong: Partner Center renewed on the change date.
@@ -171,7 +181,9 @@ export async function applyReductionAtRenewal(
     orderBy: { createdAt: "desc" },
   });
   const [reused, ...duplicates] = scheduledRecords;
+  let changeId: string;
   if (reused) {
+    changeId = reused.id;
     // Keep the scheduled record's earlier notes (the original request's event
     // and timestamp) so that email is still recognised as already applied.
     await tx.subscriptionChange.update({
@@ -182,7 +194,7 @@ export async function applyReductionAtRenewal(
       },
     });
   } else {
-    await tx.subscriptionChange.create({
+    const created = await tx.subscriptionChange.create({
       data: {
         ...changeData,
         subscriptionId: subscription.id,
@@ -190,6 +202,7 @@ export async function applyReductionAtRenewal(
         createdById: userId,
       },
     });
+    changeId = created.id;
   }
   for (const dup of duplicates) {
     await tx.subscriptionChange.update({
@@ -223,7 +236,20 @@ export async function applyReductionAtRenewal(
     });
   }
 
-  const tasks = [
+  // Not on the repeating invoice yet (its "add" task is still open)? Then
+  // that task takes the new seat count instead of a separate update task.
+  const updatedAddTask = await updateOpenAddToRepeatingTask(tx, {
+    customerId: subscription.customerId,
+    productName: subscription.product.name,
+    previousSeatCount,
+    newSeatCount,
+    pricePerSeat,
+    currency,
+    changeDate,
+    changeId,
+  });
+
+  const allTasks = [
     {
       description: [
         `UPDATE REPEATING INVOICE for ${subscription.customer.name} in Xero NOW`,
@@ -266,6 +292,7 @@ export async function applyReductionAtRenewal(
     },
   ];
 
+  const tasks = updatedAddTask ? allTasks.slice(1) : allTasks;
   for (const task of tasks) {
     await tx.amendmentQueueItem.create({
       data: { customerId: subscription.customerId, ...task },
